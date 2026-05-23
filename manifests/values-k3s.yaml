@@ -137,12 +137,12 @@ dags:
 
 ingress:
   web:
+    enabled: false
+  apiServer:
     enabled: true
     ingressClassName: traefik
     hosts:
       - name: "airflow.morescotech.com.br"
-  apiServer:
-    enabled: false
   flower:
     enabled: false
 

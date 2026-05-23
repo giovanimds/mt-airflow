@@ -216,7 +216,7 @@ class SciELOSpider(scrapy.Spider):
     name = "scielo_pt"
     allowed_domains = ["scielo.br"]
     
-    start_urls = ["http://old.scielo.br/oai/scielo-oai.php?verb=ListRecords&metadataPrefix=oai_dc"]
+    start_urls = ["https://www.scielo.br/journals/alpha?status=current"]
     
     custom_settings = {
         'DOWNLOAD_DELAY': 1.0,
@@ -226,18 +226,21 @@ class SciELOSpider(scrapy.Spider):
     }
 
     def parse(self, response):
-        response.selector.remove_namespaces()
-        
-        identifiers = response.xpath("//identifier/text()").getall()
-        for ident in identifiers:
-            pid = ident.split(":")[-1]
-            pid_url = f"https://scielo.br/scielo.php?script=sci_arttext&pid={pid}&lng=pt&nrm=iso"
-            yield scrapy.Request(pid_url, callback=self.parse_article, meta={"pid": pid})
-            
-        resumption_token = response.xpath("//resumptionToken/text()").get()
-        if resumption_token:
-            next_url = f"http://old.scielo.br/oai/scielo-oai.php?verb=ListRecords&resumptionToken={resumption_token}"
-            yield scrapy.Request(next_url, callback=self.parse)
+        journal_links = response.xpath("//a[contains(@href, '/j/')]/@href").getall()
+        for link in set(journal_links):
+            if not link.endswith("/"):
+                link += "/"
+            yield scrapy.Request(response.urljoin(link + "grid"), callback=self.parse_journal_grid)
+
+    def parse_journal_grid(self, response):
+        issue_links = response.xpath("//a[contains(@href, '/i/')]/@href").getall()
+        for link in set(issue_links):
+            yield scrapy.Request(response.urljoin(link), callback=self.parse_issue)
+
+    def parse_issue(self, response):
+        article_links = response.xpath("//a[contains(@href, '/a/')]/@href").getall()
+        for link in set(article_links):
+            yield scrapy.Request(response.urljoin(link), callback=self.parse_article)
 
     def parse_article(self, response):
         texts = response.xpath("//div[contains(@class, 'articleSection')]//p//text() | //div[contains(@class, 'content')]//p//text() | //div[@class='html-body']//p//text() | //body//p//text()").getall()
@@ -258,9 +261,8 @@ class SciELOSpider(scrapy.Spider):
 
 class BdtdSpider(scrapy.Spider):
     name = "bdtd_pt"
-    # No allowed_domains because we want to visit the university repositories
     
-    start_urls = ["https://bdtd.ibict.br/vufind/oai?verb=ListRecords&metadataPrefix=oai_dc"]
+    start_urls = ["https://bdtd.ibict.br/vufind/Search/Results?lookfor=ciencia+matematica&type=AllFields"]
     
     custom_settings = {
         'DOWNLOAD_DELAY': 2.0,
@@ -268,24 +270,23 @@ class BdtdSpider(scrapy.Spider):
     }
 
     def parse(self, response):
-        response.selector.remove_namespaces()
-        
-        records = response.xpath("//record")
-        for record in records:
-            urls = record.xpath(".//identifier/text()").getall()
-            for url in urls:
-                if url.startswith("http"):
-                    yield scrapy.Request(url, callback=self.parse_university_page)
-                    break 
-                    
-        resumption_token = response.xpath("//resumptionToken/text()").get()
-        if resumption_token:
-            next_url = f"https://bdtd.ibict.br/vufind/oai?verb=ListRecords&resumptionToken={resumption_token}"
-            yield scrapy.Request(next_url, callback=self.parse)
+        record_links = response.xpath("//a[contains(@href, '/vufind/Record/')]/@href").getall()
+        for link in set(record_links):
+            yield scrapy.Request(response.urljoin(link), callback=self.parse_record)
+            
+        next_page = response.xpath("//a[contains(@class, 'page-link') and contains(@aria-label, 'Next')]/@href | //a[contains(@class, 'next')]/@href | //a[@title='Próxima página']/@href").get()
+        if next_page:
+            yield scrapy.Request(response.urljoin(next_page), callback=self.parse)
+
+    def parse_record(self, response):
+        external_links = response.xpath("//a[contains(@class, 'btn-primary') and contains(@href, 'http')]/@href | //table//a[contains(@href, 'http')]/@href").getall()
+        for link in set(external_links):
+            if "ibict.br" not in link:
+                yield scrapy.Request(link, callback=self.parse_university_page)
 
     def parse_university_page(self, response):
-        pdf_links = response.xpath("//a[contains(@href, '.pdf')]/@href").getall()
-        for link in pdf_links:
+        pdf_links = response.xpath("//a[contains(@href, '.pdf')]/@href | //a[contains(@href, 'bitstream')]/@href").getall()
+        for link in set(pdf_links):
             yield scrapy.Request(response.urljoin(link), callback=self.parse_pdf)
 
     def parse_pdf(self, response):

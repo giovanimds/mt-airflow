@@ -133,7 +133,7 @@ dags:
     repo: https://github.com/giovanimds/mt-airflow.git
     branch: main
     subPath: "dags"
-    interval: 60
+    wait: 60
 
 ingress:
   web:

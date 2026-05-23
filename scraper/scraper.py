@@ -212,6 +212,192 @@ class GutenbergPTSpider(scrapy.Spider):
             }
 
 
+class SciELOSpider(scrapy.Spider):
+    name = "scielo_pt"
+    allowed_domains = ["scielo.br"]
+    
+    start_urls = ["http://old.scielo.br/oai/scielo-oai.php?verb=ListRecords&metadataPrefix=oai_dc"]
+    
+    custom_settings = {
+        'DOWNLOAD_DELAY': 1.0,
+        'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'RETRY_HTTP_CODES': [403, 429, 500, 502, 503, 504],
+        'RETRY_TIMES': 5,
+    }
+
+    def parse(self, response):
+        response.selector.remove_namespaces()
+        
+        identifiers = response.xpath("//identifier/text()").getall()
+        for ident in identifiers:
+            pid = ident.split(":")[-1]
+            pid_url = f"https://scielo.br/scielo.php?script=sci_arttext&pid={pid}&lng=pt&nrm=iso"
+            yield scrapy.Request(pid_url, callback=self.parse_article, meta={"pid": pid})
+            
+        resumption_token = response.xpath("//resumptionToken/text()").get()
+        if resumption_token:
+            next_url = f"http://old.scielo.br/oai/scielo-oai.php?verb=ListRecords&resumptionToken={resumption_token}"
+            yield scrapy.Request(next_url, callback=self.parse)
+
+    def parse_article(self, response):
+        texts = response.xpath("//div[contains(@class, 'articleSection')]//p//text() | //div[contains(@class, 'content')]//p//text() | //div[@class='html-body']//p//text() | //body//p//text()").getall()
+        full_text = " ".join([t.strip() for t in texts if t.strip()])
+        title = response.xpath("//h1[@class='article-title']/text() | //h1/text()").get(default="SciELO Article").strip()
+        
+        if len(full_text) > 500:
+            yield {
+                "title": title,
+                "text": full_text,
+                "url": response.url,
+                "language": "pt-br",
+                "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                "char_count": len(full_text),
+                "word_count": len(full_text.split()),
+            }
+
+
+class BdtdSpider(scrapy.Spider):
+    name = "bdtd_pt"
+    # No allowed_domains because we want to visit the university repositories
+    
+    start_urls = ["https://bdtd.ibict.br/vufind/oai?verb=ListRecords&metadataPrefix=oai_dc"]
+    
+    custom_settings = {
+        'DOWNLOAD_DELAY': 2.0,
+        'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    }
+
+    def parse(self, response):
+        response.selector.remove_namespaces()
+        
+        records = response.xpath("//record")
+        for record in records:
+            urls = record.xpath(".//identifier/text()").getall()
+            for url in urls:
+                if url.startswith("http"):
+                    yield scrapy.Request(url, callback=self.parse_university_page)
+                    break 
+                    
+        resumption_token = response.xpath("//resumptionToken/text()").get()
+        if resumption_token:
+            next_url = f"https://bdtd.ibict.br/vufind/oai?verb=ListRecords&resumptionToken={resumption_token}"
+            yield scrapy.Request(next_url, callback=self.parse)
+
+    def parse_university_page(self, response):
+        pdf_links = response.xpath("//a[contains(@href, '.pdf')]/@href").getall()
+        for link in pdf_links:
+            yield scrapy.Request(response.urljoin(link), callback=self.parse_pdf)
+
+    def parse_pdf(self, response):
+        try:
+            doc = fitz.open(stream=response.body, filetype="pdf")
+            text_blocks = [page.get_text() for page in doc]
+            full_text = "\n".join(text_blocks).strip()
+            
+            if len(full_text) > 1000:
+                yield {
+                    "title": "BDTD Thesis/Dissertation",
+                    "text": full_text,
+                    "url": response.url,
+                    "language": "pt-br",
+                    "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "char_count": len(full_text),
+                    "word_count": len(full_text.split()),
+                }
+        except Exception as e:
+            self.logger.error(f"Erro ao parsear PDF do BDTD {response.url}: {e}")
+
+
+class BolemaSpider(scrapy.Spider):
+    name = "bolema_pt"
+    start_urls = ["https://www.scielo.br/j/bolema/grid"]
+    
+    custom_settings = {
+        'DOWNLOAD_DELAY': 1.0,
+        'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    }
+
+    def parse(self, response):
+        issue_links = response.xpath("//a[contains(@href, '/j/bolema/i/')]/@href").getall()
+        for link in issue_links:
+            yield scrapy.Request(response.urljoin(link), callback=self.parse_issue)
+
+    def parse_issue(self, response):
+        article_links = response.xpath("//a[contains(@href, '/j/bolema/a/')]/@href").getall()
+        for link in article_links:
+            yield scrapy.Request(response.urljoin(link), callback=self.parse_article)
+
+    def parse_article(self, response):
+        texts = response.xpath("//div[contains(@class, 'articleSection')]//p//text() | //div[contains(@class, 'content')]//p//text() | //div[@class='html-body']//p//text() | //body//p//text()").getall()
+        full_text = " ".join([t.strip() for t in texts if t.strip()])
+        title = response.xpath("//h1[@class='article-title']/text() | //h1/text()").get(default="Bolema Article").strip()
+        
+        if len(full_text) > 500:
+            yield {
+                "title": title,
+                "text": full_text,
+                "url": response.url,
+                "language": "pt-br",
+                "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                "char_count": len(full_text),
+                "word_count": len(full_text.split()),
+            }
+
+
+class RematSpider(scrapy.Spider):
+    name = "remat_pt"
+    start_urls = ["https://periodicos.ifrs.edu.br/index.php/REMAT/issue/archive"]
+    
+    custom_settings = {
+        'DOWNLOAD_DELAY': 2.0,
+        'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    }
+
+    def parse(self, response):
+        issue_links = response.xpath("//a[contains(@class, 'title')]/@href").getall()
+        for link in issue_links:
+            yield scrapy.Request(response.urljoin(link), callback=self.parse_issue)
+            
+        next_page = response.xpath("//a[@class='next']/@href").get()
+        if next_page:
+            yield scrapy.Request(response.urljoin(next_page), callback=self.parse)
+
+    def parse_issue(self, response):
+        article_links = response.xpath("//div[@class='title']/a/@href").getall()
+        for link in article_links:
+            yield scrapy.Request(response.urljoin(link), callback=self.parse_article)
+
+    def parse_article(self, response):
+        pdf_link = response.xpath("//a[contains(@class, 'galley-link') and contains(@class, 'pdf')]/@href").get()
+        if pdf_link:
+            pdf_url = response.urljoin(pdf_link)
+            yield scrapy.Request(pdf_url, callback=self.parse_pdf)
+
+    def parse_pdf(self, response):
+        real_pdf_link = response.xpath("//a[contains(@class, 'download')]/@href").get()
+        if real_pdf_link and not response.body.startswith(b'%PDF'):
+            yield scrapy.Request(response.urljoin(real_pdf_link), callback=self.parse_pdf)
+            return
+
+        try:
+            doc = fitz.open(stream=response.body, filetype="pdf")
+            text_blocks = [page.get_text() for page in doc]
+            full_text = "\n".join(text_blocks).strip()
+            
+            if len(full_text) > 500:
+                yield {
+                    "title": "REMAT Article",
+                    "text": full_text,
+                    "url": response.url,
+                    "language": "pt-br",
+                    "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "char_count": len(full_text),
+                    "word_count": len(full_text.split()),
+                }
+        except Exception as e:
+            self.logger.error(f"Erro ao parsear PDF da REMAT {response.url}: {e}")
+
+
 if __name__ == "__main__":
     max_docs = int(os.environ.get("MAX_DOCUMENTS", 100))
     output_bucket = os.environ.get("OUTPUT_BUCKET", "")
@@ -236,6 +422,14 @@ if __name__ == "__main__":
         process.crawl(ArxivSpider)
     elif spider_name == "gutenberg_pt":
         process.crawl(GutenbergPTSpider)
+    elif spider_name == "scielo_pt":
+        process.crawl(SciELOSpider)
+    elif spider_name == "bdtd_pt":
+        process.crawl(BdtdSpider)
+    elif spider_name == "bolema_pt":
+        process.crawl(BolemaSpider)
+    elif spider_name == "remat_pt":
+        process.crawl(RematSpider)
     else:
         raise ValueError(f"Spider desconhecida: {spider_name}")
         

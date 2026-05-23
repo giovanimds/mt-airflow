@@ -29,7 +29,7 @@ with DAG(
     tags=["dataset-builder", "scraper", "corpus"],
 ) as dag:
 
-    spiders = ["wikipedia_pt", "arxiv_pt", "gutenberg_pt"]
+    spiders = ["wikipedia_pt", "arxiv_pt", "gutenberg_pt", "scielo_pt", "bdtd_pt", "bolema_pt", "remat_pt"]
     
     for spider_name in spiders:
         KubernetesPodOperator(

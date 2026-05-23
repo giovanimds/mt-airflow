@@ -117,6 +117,7 @@ class ArxivSpider(scrapy.Spider):
         'CONCURRENT_REQUESTS_PER_DOMAIN': 1,
         'RETRY_HTTP_CODES': [429, 500, 502, 503, 504, 522, 524, 408],
         'RETRY_TIMES': 5,
+        'USER_AGENT': 'Mozilla/5.0 (compatible; mt-airflow-scraper/1.0; +http://example.com)'
     }
 
     def parse(self, response):
@@ -125,6 +126,7 @@ class ArxivSpider(scrapy.Spider):
 
     def parse_api(self, response):
         # ArXiv API returns XML (Atom format)
+        response.selector.remove_namespaces()
         entries = response.css("entry")
         
         if not entries:

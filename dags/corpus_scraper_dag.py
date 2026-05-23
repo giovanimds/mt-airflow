@@ -51,7 +51,7 @@ with DAG(
                 ),
                 k8s.V1EnvVar(
                     name="MAX_DOCUMENTS",
-                    value="{{ var.value.get('SCRAPER_MAX_DOCUMENTS', '500') }}",
+                    value="{{ var.value.get('SCRAPER_MAX_DOCUMENTS', '500000') }}",
                 ),
                 k8s.V1EnvVar(
                     name="CHUNK_SIZE",

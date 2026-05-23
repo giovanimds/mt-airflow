@@ -110,7 +110,7 @@ class WikipediaPTSpider(scrapy.Spider):
             }
 
         # 2. Seguir links para outras páginas da Wikipédia em português
-        links = response.css("#mw-content-text .mw-parser-output a::attr(href)").getall()
+        links = response.css("#mw-content-text a::attr(href)").getall()
         for link in links:
             # Ignorar namespaces especiais
             if link.startswith("/wiki/") and not re.search(
@@ -133,7 +133,13 @@ class WikipediaPTSpider(scrapy.Spider):
 class RedditPTSpider(scrapy.Spider):
     name = "reddit_pt"
     allowed_domains = ["reddit.com"]
-    start_urls = ["https://www.reddit.com/r/brasil/new.json?limit=100"]
+    start_urls = [
+        "https://www.reddit.com/r/brasil/new.json?limit=100",
+        "https://www.reddit.com/r/brasil/hot.json?limit=100",
+        "https://www.reddit.com/r/brasil/top.json?limit=100&t=all",
+        "https://www.reddit.com/r/portugal/new.json?limit=100",
+        "https://www.reddit.com/r/portugal/hot.json?limit=100"
+     ]
     
     custom_settings = {
         'USER_AGENT': 'bot:my_corpus_bot:v1.0 (by /u/corpus_builder)',
@@ -168,7 +174,8 @@ class RedditPTSpider(scrapy.Spider):
                 
         after = data["data"].get("after")
         if after:
-            next_url = f"https://www.reddit.com/r/brasil/new.json?limit=100&after={after}"
+            base_url = response.url.split("?")[0]
+            next_url = f"{base_url}?limit=100&after={after}"
             yield scrapy.Request(next_url, callback=self.parse)
 
 

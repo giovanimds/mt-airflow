@@ -9,20 +9,20 @@ config:
     remote_log_conn_id: 'google_cloud_default'
 
 
-# Pacotes instalados automaticamente em todos os pods (worker, scheduler, etc.)
-# Instala na inicialização do container — adequado para ambientes sem imagem customizada.
-_pip_additional_requirements: >-
-  polars
-  langchain-ollama
-  langchain-mistralai
-  langchain-google-genai
-  langchain-core
-  langchain-community
-  google-cloud-storage
-
 env:
   - name: GOOGLE_APPLICATION_CREDENTIALS
     value: /opt/airflow/secrets/gcp/service-account.json
+  # Pacotes instalados automaticamente em todos os pods (worker, scheduler, etc.)
+  # O Helm chart do Airflow lê esta variável e executa pip install no startup.
+  - name: _PIP_ADDITIONAL_REQUIREMENTS
+    value: >-
+      polars
+      langchain-ollama
+      langchain-mistralai
+      langchain-google-genai
+      langchain-core
+      langchain-community
+      google-cloud-storage
 
 volumes:
   - name: gcp-service-account

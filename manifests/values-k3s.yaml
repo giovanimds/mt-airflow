@@ -5,7 +5,7 @@ allowJobLaunching: true
 config:
   logging:
     remote_logging: 'True'
-    remote_base_log_folder: 'gs://airflow-logs-morescotech/logs'
+    remote_base_log_folder: 'gs://mt-airflow/logs'
     remote_log_conn_id: 'google_cloud_default'
 
 

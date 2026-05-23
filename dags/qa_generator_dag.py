@@ -17,8 +17,8 @@ def _find_and_process_new_chunks(**context):
     executa a geração de Q&A apenas para os novos.
     """
     import sys
-    sys.path.insert(0, "/opt/airflow/dags/scripts")
-    sys.path.insert(0, "/opt/airflow/dags")
+    sys.path.insert(0, "/opt/airflow/dags/repo/dags/scripts")
+    sys.path.insert(0, "/opt/airflow/dags/repo/dags")
 
     from google.cloud import storage
     from scripts.generate_qa import build_pipeline, parse_reasoning_and_answer

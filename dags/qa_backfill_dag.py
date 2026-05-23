@@ -21,7 +21,7 @@ with DAG(
 
     backfill_qa = BashOperator(
         task_id="backfill_qa",
-        bash_command="python /opt/airflow/dags/scripts/generate_qa.py",
+        bash_command="python /opt/airflow/dags/repo/dags/scripts/generate_qa.py",
         env={
             "GOOGLE_APPLICATION_CREDENTIALS": "/opt/airflow/secrets/gcp/service-account.json"
         },

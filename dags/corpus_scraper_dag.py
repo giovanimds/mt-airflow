@@ -38,7 +38,7 @@ with DAG(
             namespace="airflow",
             # Imagem que contém o script scraper.py
             image="{{ var.value.get('SCRAPER_IMAGE', 'localhost:5000/corpus-scraper:v1.0') }}",
-            image_pull_policy="IfNotPresent",
+            image_pull_policy="Always",
             # Passagem de variáveis de ambiente configuráveis para o container do Scrapy
             env_vars=[
                 k8s.V1EnvVar(

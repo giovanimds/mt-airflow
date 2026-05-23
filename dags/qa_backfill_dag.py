@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timezone
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.providers.standard.operators.python import PythonOperator
 
 log = logging.getLogger(__name__)
 

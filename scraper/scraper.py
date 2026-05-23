@@ -9,6 +9,7 @@ import pandas as pd
 import scrapy
 from itemadapter import ItemAdapter
 from scrapy.crawler import CrawlerProcess
+import fitz  # PyMuPDF
 
 
 class ParquetChunkPipeline:
@@ -70,113 +71,102 @@ class WikipediaPTSpider(scrapy.Spider):
     name = "wikipedia_pt"
     allowed_domains = ["pt.wikipedia.org"]
     start_urls = [
-        "https://pt.wikipedia.org/wiki/Especial:Aleat%C3%B3ria",
-        "https://pt.wikipedia.org/wiki/Portal:Conte%C3%BAdo_destacado"
+        "https://pt.wikipedia.org/w/api.php?action=query&generator=random&grnnamespace=0&prop=extracts&explaintext=1&format=json&grnlimit=1"
     ]
-
-    def parse(self, response):
-        # 1. Extrair conteúdo do artigo atual
-        title = response.css("h1#firstHeading *::text").get()
-        paragraphs = response.css("#mw-content-text .mw-parser-output p")
-        
-        # Limpar e juntar o texto dos parágrafos
-        text_blocks = []
-        for p in paragraphs:
-            # Ignorar parágrafos que estejam dentro de infoboxes, tabelas, referências, etc.
-            is_noise = p.xpath(
-                "ancestor::*[contains(@class, 'infobox') or contains(@class, 'navbox') or contains(@class, 'metadata') or name()='table' or contains(@class, 'reflist')]"
-            )
-            if is_noise:
-                continue
-                
-            text = "".join(p.css("*::text").getall()).strip()
-            if text:
-                # Remove citações de referências, ex: [1], [12], [nota 2]
-                text = re.sub(r"\[(?:nota\s+)?\d+\]", "", text)
-                text_blocks.append(text)
-        
-        full_text = "\n".join(text_blocks).strip()
-        
-        # Processar apenas páginas que contenham texto relevante
-        if title and len(full_text) > 200:
-            yield {
-                "title": title.strip(),
-                "text": full_text,
-                "url": response.url,
-                "language": "pt-br",
-                "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-                "char_count": len(full_text),
-                "word_count": len(full_text.split()),
-            }
-
-        # 2. Seguir links para outras páginas da Wikipédia em português
-        links = response.css("#mw-content-text a::attr(href)").getall()
-        for link in links:
-            # Ignorar namespaces especiais
-            if link.startswith("/wiki/") and not re.search(
-                r"^/wiki/(Wikip%C3%A9dia|Discuss%C3%A3o|Especial|Categoria|Ajuda|Ficheiro|Portal|Predefini%C3%A7%C3%A3o|MediaWiki|Anexo|Projeto):",
-                link,
-                re.IGNORECASE,
-            ):
-                if ":" not in link[6:]:
-                    next_url = response.urljoin(link)
-                    yield scrapy.Request(next_url, callback=self.parse)
-                    
-        # Yield ocasionalmente para a página aleatória para diversificar o rastreamento
-        yield scrapy.Request(
-            "https://pt.wikipedia.org/wiki/Especial:Aleat%C3%B3ria",
-            callback=self.parse,
-            priority=-1
-        )
-
-
-class RedditPTSpider(scrapy.Spider):
-    name = "reddit_pt"
-    allowed_domains = ["reddit.com"]
-    start_urls = [
-        "https://www.reddit.com/r/brasil/new.json?limit=100",
-        "https://www.reddit.com/r/brasil/hot.json?limit=100",
-        "https://www.reddit.com/r/brasil/top.json?limit=100&t=all",
-        "https://www.reddit.com/r/portugal/new.json?limit=100",
-        "https://www.reddit.com/r/portugal/hot.json?limit=100"
-     ]
-    
-    custom_settings = {
-        'USER_AGENT': 'bot:my_corpus_bot:v1.0 (by /u/corpus_builder)',
-        'DOWNLOAD_DELAY': 1.5,
-    }
 
     def parse(self, response):
         try:
             data = json.loads(response.text)
         except Exception as e:
-            self.logger.error(f"Failed to parse JSON: {e}")
+            self.logger.error(f"Erro ao ler JSON: {e}")
             return
 
-        if "data" not in data or "children" not in data["data"]:
-            return
+        pages = data.get("query", {}).get("pages", {})
+        for page_id, page_info in pages.items():
+            title = page_info.get("title", "")
+            text = page_info.get("extract", "").strip()
 
-        for child in data["data"]["children"]:
-            post = child.get("data", {})
-            text = post.get("selftext", "").strip()
-            
-            # Só extrair se o post tiver texto considerável
-            if len(text) > 200:
+            if title and len(text) > 200:
                 yield {
-                    "title": post.get("title", ""),
+                    "title": title,
                     "text": text,
-                    "url": f"https://www.reddit.com{post.get('permalink', '')}",
+                    "url": f"https://pt.wikipedia.org/wiki/?curid={page_id}",
                     "language": "pt-br",
                     "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
                     "char_count": len(text),
                     "word_count": len(text.split()),
                 }
+
+        # Continuar solicitando páginas aleatórias infinitamente (limitado pelo CLOSESPIDER_ITEMCOUNT global)
+        yield scrapy.Request(
+            self.start_urls[0],
+            callback=self.parse,
+            dont_filter=True
+        )
+
+
+class ArxivSpider(scrapy.Spider):
+    name = "arxiv_pt"
+    allowed_domains = ["export.arxiv.org", "arxiv.org"]
+    
+    # Query de exemplo, buscando artigos de CS
+    base_api_url = "http://export.arxiv.org/api/query?search_query=cat:cs.AI&start={}&max_results=50"
+    
+    custom_settings = {
+        'DOWNLOAD_DELAY': 3.0,  # ArXiv requer delay
+        'CONCURRENT_REQUESTS_PER_DOMAIN': 1,
+        'RETRY_HTTP_CODES': [429, 500, 502, 503, 504, 522, 524, 408],
+        'RETRY_TIMES': 5,
+    }
+
+    def start_requests(self):
+        yield scrapy.Request(self.base_api_url.format(0), callback=self.parse_api, meta={"start": 0})
+
+    def parse_api(self, response):
+        # ArXiv API returns XML (Atom format)
+        entries = response.css("entry")
+        
+        if not entries:
+            self.logger.warning("No more entries found or rate limit hit.")
+            return
+
+        for entry in entries:
+            title = entry.css("title::text").get(default="").strip()
+            pdf_url = entry.css("link[type='application/pdf']::attr(href)").get()
+            
+            if pdf_url:
+                # O PDF url geralmente termina com 'v1', 'v2', etc. Mas podemos puxar direto.
+                yield scrapy.Request(
+                    pdf_url,
+                    callback=self.parse_pdf,
+                    meta={"title": title, "url": pdf_url}
+                )
                 
-        after = data["data"].get("after")
-        if after:
-            base_url = response.url.split("?")[0]
-            next_url = f"{base_url}?limit=100&after={after}"
-            yield scrapy.Request(next_url, callback=self.parse)
+        # Next page
+        start = response.meta["start"] + 50
+        yield scrapy.Request(self.base_api_url.format(start), callback=self.parse_api, meta={"start": start})
+
+    def parse_pdf(self, response):
+        try:
+            doc = fitz.open(stream=response.body, filetype="pdf")
+            text_blocks = []
+            for page in doc:
+                text_blocks.append(page.get_text())
+            
+            full_text = "\n".join(text_blocks).strip()
+            
+            if len(full_text) > 1000:
+                yield {
+                    "title": response.meta.get("title", "ArXiv Document"),
+                    "text": full_text,
+                    "url": response.meta.get("url"),
+                    "language": "en", # ArXiv is mostly English, but we process it anyway
+                    "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "char_count": len(full_text),
+                    "word_count": len(full_text.split()),
+                }
+        except Exception as e:
+            self.logger.error(f"Erro ao parsear PDF {response.url}: {e}")
 
 
 class GutenbergPTSpider(scrapy.Spider):
@@ -234,8 +224,8 @@ if __name__ == "__main__":
     
     if spider_name == "wikipedia_pt":
         process.crawl(WikipediaPTSpider)
-    elif spider_name == "reddit_pt":
-        process.crawl(RedditPTSpider)
+    elif spider_name == "arxiv_pt":
+        process.crawl(ArxivSpider)
     elif spider_name == "gutenberg_pt":
         process.crawl(GutenbergPTSpider)
     else:

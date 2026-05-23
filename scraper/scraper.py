@@ -110,7 +110,7 @@ class ArxivSpider(scrapy.Spider):
     allowed_domains = ["export.arxiv.org", "arxiv.org"]
     
     # Query de exemplo, buscando artigos de CS
-    base_api_url = "http://export.arxiv.org/api/query?search_query=cat:cs.AI&start={}&max_results=50"
+    start_urls = ["http://export.arxiv.org/api/query?search_query=cat:cs.AI&start=0&max_results=50"]
     
     custom_settings = {
         'DOWNLOAD_DELAY': 3.0,  # ArXiv requer delay
@@ -119,8 +119,9 @@ class ArxivSpider(scrapy.Spider):
         'RETRY_TIMES': 5,
     }
 
-    def start_requests(self):
-        yield scrapy.Request(self.base_api_url.format(0), callback=self.parse_api, meta={"start": 0})
+    def parse(self, response):
+        response.meta["start"] = 0
+        return self.parse_api(response)
 
     def parse_api(self, response):
         # ArXiv API returns XML (Atom format)
@@ -144,7 +145,8 @@ class ArxivSpider(scrapy.Spider):
                 
         # Next page
         start = response.meta["start"] + 50
-        yield scrapy.Request(self.base_api_url.format(start), callback=self.parse_api, meta={"start": start})
+        next_url = f"http://export.arxiv.org/api/query?search_query=cat:cs.AI&start={start}&max_results=50"
+        yield scrapy.Request(next_url, callback=self.parse_api, meta={"start": start})
 
     def parse_pdf(self, response):
         try:

@@ -1,0 +1,167 @@
+executor: CeleryExecutor
+allowPodLaunching: true
+allowJobLaunching: true
+
+config:
+  logging:
+    remote_logging: 'True'
+    remote_base_log_folder: 'gs://airflow-logs-morescotech/logs'
+    remote_log_conn_id: 'google_cloud_default'
+
+
+env:
+  - name: GOOGLE_APPLICATION_CREDENTIALS
+    value: /opt/airflow/secrets/gcp/service-account.json
+
+volumes:
+  - name: gcp-service-account
+    secret:
+      secretName: airflow-gcp-sa
+
+volumeMounts:
+  - name: gcp-service-account
+    mountPath: /opt/airflow/secrets/gcp
+    readOnly: true
+
+data:
+  metadataSecretName: airflow-metadata
+  resultBackendSecretName: airflow-result-backend
+
+fernetKeySecretName: airflow-fernet
+apiSecretKeySecretName: airflow-api
+jwtSecretName: airflow-jwt
+
+postgresql:
+  enabled: false
+
+redis:
+  enabled: true
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 1Gi
+
+pgbouncer:
+  enabled: false
+
+flower:
+  enabled: false
+
+statsd:
+  enabled: true
+
+webserver:
+  replicas: 1
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+apiServer:
+  replicas: 1
+  service:
+    type: ClusterIP
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+scheduler:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+triggerer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+dagProcessor:
+  enabled: true
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 300m
+      memory: 512Mi
+
+workers:
+  celery:
+    enableDefault: true
+    replicas: 1
+    persistence:
+      enabled: false
+    resources:
+      requests:
+        cpu: 200m
+        memory: 1Gi
+      limits:
+        cpu: 1000m
+        memory: 4Gi
+
+logs:
+  persistence:
+    enabled: false
+    storageClassName: local-path
+    size: 10Gi
+
+dags:
+  persistence:
+    enabled: false
+  gitSync:
+    enabled: true
+    repo: https://github.com/morescotech/airflow-dags.git
+    branch: main
+    subPath: "dags"
+    interval: 60
+
+ingress:
+  web:
+    enabled: true
+    ingressClassName: traefik
+    hosts:
+      - name: "airflow.morescotech.com.br"
+  apiServer:
+    enabled: false
+  flower:
+    enabled: false
+
+cleanup:
+  enabled: true
+
+databaseCleanup:
+  enabled: false
+
+createUserJob:
+  enabled: true
+  defaultUser:
+    enabled: true
+    role: Admin
+    username: admin
+    email: admin@example.com
+    firstName: admin
+    lastName: user
+    password: admin
+
+migrateDatabaseJob:
+  enabled: true

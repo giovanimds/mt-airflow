@@ -110,13 +110,17 @@ class ArxivSpider(scrapy.Spider):
     allowed_domains = ["export.arxiv.org", "arxiv.org"]
     
     # Query de exemplo, buscando artigos de CS
-    start_urls = ["http://export.arxiv.org/api/query?search_query=cat:cs.AI&start=0&max_results=50"]
+    start_urls = ["http://export.arxiv.org/api/query?search_query=cat:cs.AI&start=0&max_results=1000"]
     
     custom_settings = {
         'DOWNLOAD_DELAY': 3.0,  # ArXiv requer delay
+        'AUTOTHROTTLE_ENABLED': True,
+        'AUTOTHROTTLE_START_DELAY': 3.0,
+        'AUTOTHROTTLE_MAX_DELAY': 60.0,
+        'AUTOTHROTTLE_TARGET_CONCURRENCY': 1.0,
         'CONCURRENT_REQUESTS_PER_DOMAIN': 1,
         'RETRY_HTTP_CODES': [429, 500, 502, 503, 504, 522, 524, 408],
-        'RETRY_TIMES': 5,
+        'RETRY_TIMES': 15,
         'USER_AGENT': 'Mozilla/5.0 (compatible; mt-airflow-scraper/1.0; +http://example.com)'
     }
 
@@ -146,8 +150,8 @@ class ArxivSpider(scrapy.Spider):
                 )
                 
         # Next page
-        start = response.meta["start"] + 50
-        next_url = f"http://export.arxiv.org/api/query?search_query=cat:cs.AI&start={start}&max_results=50"
+        start = response.meta["start"] + 1000
+        next_url = f"http://export.arxiv.org/api/query?search_query=cat:cs.AI&start={start}&max_results=1000"
         yield scrapy.Request(next_url, callback=self.parse_api, meta={"start": start})
 
     def parse_pdf(self, response):

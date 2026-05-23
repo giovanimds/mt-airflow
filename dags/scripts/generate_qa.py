@@ -1,6 +1,9 @@
 import os
 import json
+import logging
+import traceback
 import polars as pl
+
 from google.cloud import storage
 from langchain_ollama import ChatOllama
 from langchain_mistralai import ChatMistralAI
@@ -8,7 +11,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.runnables import RunnableLambda, RunnableParallel
 
+log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
 # Prompts
+# ---------------------------------------------------------------------------
 abstract_prompt = ChatPromptTemplate.from_template(
     """Você é um assistente especializado em mineração de dados acadêmicos. 
 Analise o texto bruto fornecido e retorne APENAS um objeto JSON contendo duas chaves:
@@ -45,12 +52,12 @@ Regras:
 - eh_ponderativo é true se o artigo fizer uma análise crítica ou reflexão profunda sobre um tema.
 - eh_exploratorio é true se o artigo apresentar um estudo exploratório, levantamento de dados ou análise de campo.
 - eh_especulativo é true se o artigo apresentar hipóteses, conjecturas ou propostas teóricas sem necessariamente ter dados empíricos.
-- eh_embasado_em_dados é true se o artigo apresentar dados empíricos, análises estatísticas ou evidências concretas para sustentar suas conclusões.
-- eh_embasado_em_dados é true APENAS se os dados, métricas ou descobertas empíricas estiverem explicitamente descritos no resumo. Apenas mencionar a palavra "resultados" sem explicações não é suficiente.
+- eh_embasado_em_dados é true se o artigo apresentar dados empíricos, análises estatísticas ou evidências concretas.
+- eh_embasado_em_dados é true APENAS se os dados estiverem explicitamente descritos no resumo.
 - eh_destilavel_pergunta_resposta é true se o artigo puder ser resumido em um formato de pergunta e resposta direta.
 - eh_destilavel_chain_of_thought é true se o artigo puder ser resumido em um formato de cadeia de raciocínio passo a passo.
-- eh_desprovido_de_utilidade_pratica é true se o texto apresentado estiver incompleto, for apenas um fragmento de rodapé, instrução de navegação ou qualquer coisa que não seja o conteúdo acadêmico do artigo. Ou seja, se o texto não tiver utilidade prática para um pesquisador ou estudante que queira entender o conteúdo do artigo.
-- eh_desprovido_de_utilidade_pratica é true se o texto não contiver pelo menos uma conclusão tangível, um método claro ou um dado concreto. Frases puramente introdutórias que apenas anunciam sobre o que o artigo trata (ex: "Este artigo informa sobre os resultados...") sem apresentar quais foram esses resultados DEVERÃO ser marcadas como true.
+- eh_desprovido_de_utilidade_pratica é true se o texto estiver incompleto, for um fragmento de rodapé, instrução de navegação, ou não tiver utilidade prática.
+- eh_desprovido_de_utilidade_pratica é true se o texto não contiver pelo menos uma conclusão tangível, um método claro ou um dado concreto.
 
 Resumo:
 {abstract}
@@ -62,19 +69,15 @@ qa_prompt = ChatPromptTemplate.from_template(
     Com base no resumo fornecido, gere exatamente {quantidade} perguntas diretas.
 
     REGRA CRÍTICA DE CONTEXTO (ANCORAGEM):
-    Nenhuma pergunta pode ser genérica. Toda pergunta DEVE citar o contexto específico do estudo para fazer sentido isoladamente. 
-    - ERRADO: "Qual foi o principal resultado?", "Existe correlação entre x e y segundo o artigo?" (Essas perguntas são genéricas e não fazem sentido sem o contexto do resumo)
-    - CERTO: "Li um artigo que diz que a capacidade dos alunos é limita, segundo esse artigo seria mais eficiente decorar certas coisas como a tabuada?" (Essa pergunta é contextualizada e faz sentido isoladamente, mesmo sem o resumo completo)
-    - Não faça perguntas sobre o artigo diretamente pois quem responderá a pergunta não terá acesso ao resumo completo, portanto, cada pergunta deve conter o contexto necessário para ser compreendida por si só.
-    - Não cite o artigo, inclua ele na pargunta de forma contextualizada, ou seja, a pergunta deve conter o contexto necessário para ser compreendida por si só, sem mencionar que é um artigo ou estudo.
-    - Não cite nomes ou localidades especificas, procure abstrair o máximo possível mantendo o contexto necessário para a pergunta fazer sentido.
+    Nenhuma pergunta pode ser genérica. Toda pergunta DEVE citar o contexto específico do estudo para fazer sentido isoladamente.
+    - ERRADO: "Qual foi o principal resultado?", "Existe correlação entre x e y segundo o artigo?"
+    - CERTO: Perguntas que carregam o contexto necessário para serem compreendidas sem o resumo.
+    - Não mencione que é um artigo ou estudo.
+    - Não cite nomes ou localidades específicas; abstraia mantendo o contexto.
 
     Exemplos ruins:
     "Em um artigo sobre ...", "Segundo um estudo recente ...", "De acordo com um artigo científico ..."
 
-    Bons exemplos:
-    "Dado que na computação algoritmos podem ser otimizados para reduzir a complexidade, seria possível aplicar técnicas de otimização para melhorar o desempenho de algoritmos de ordenação em grandes conjuntos de dados?" (Essa pergunta é contextualizada e faz sentido isoladamente, mesmo sem o resumo completo)
-    
     Retorne APENAS uma lista JSON com o formato:
     [
       {{
@@ -92,9 +95,8 @@ solucionador_prompt = ChatPromptTemplate.from_template(
     Explique sua linha de raciocínio passo a passo antes de dar a conclusão final.
 
     REGRAS:
-    - Sua resposta deve conter dois elementos essenciais: o raciocínio detalhado e a conclusão final.
-    - Raciocinio: **Identificação da intenção** Explicação sobre o que a pergunta está buscando. \n\n **Raciocínando** Análise detalhada dos pontos relevantes do resumo, considerando diferentes perspectivas ou possibilidades. \n\n **Resposta** A resposta final baseada no raciocínio. \n\n **Revisão** Uma revisão crítica do raciocínio e da resposta para garantir precisão e relevância.
-    - Conclusão final": A resposta final baseada no raciocínio
+    - Raciocinio: **Identificação da intenção** → **Raciocínando** → **Resposta** → **Revisão**
+    - Conclusão final: A resposta final baseada no raciocínio
 
     Pergunta: {pergunta}
     """
@@ -103,173 +105,287 @@ solucionador_prompt = ChatPromptTemplate.from_template(
 json_parser = JsonOutputParser()
 str_parser = StrOutputParser()
 
+
+# ---------------------------------------------------------------------------
+# Pipeline builder
+# ---------------------------------------------------------------------------
 def build_pipeline(llm):
     chain_perguntas = qa_prompt | llm | json_parser
     chain_resposta = solucionador_prompt | llm | str_parser
 
     def gerar_dataset_desacoplado(inputs):
         resultado_perguntas = chain_perguntas.invoke(inputs)
-        
         if isinstance(resultado_perguntas, dict):
             lista_perguntas = resultado_perguntas.get("perguntas", [])
         elif isinstance(resultado_perguntas, list):
             lista_perguntas = resultado_perguntas
         else:
             lista_perguntas = []
-        
+
         dataset = []
         for p in lista_perguntas:
             p_text = p.get("pergunta", "") if isinstance(p, dict) else str(p)
-            if not p_text: continue
-            resposta = chain_resposta.invoke({"pergunta": p_text}) 
-            dataset.append({
-                "instruction": p_text,
-                "response": resposta
-            })
+            if not p_text:
+                continue
+            resposta = chain_resposta.invoke({"pergunta": p_text})
+            dataset.append({"instruction": p_text, "response": resposta})
         return dataset
 
     def roteador_de_lixo(inputs):
         fase_1 = inputs["fase_1"]
         fase_2 = inputs["fase_2"]
         eh_lixo = fase_2.get("eh_desprovido_de_utilidade_pratica", False)
-        
+
         if eh_lixo:
             return {
-                "fase_1": fase_1, "fase_2": fase_2, "dataset_instrucoes": None,
-                "status_pipeline": "descartado_para_revisao"
+                "fase_1": fase_1,
+                "fase_2": fase_2,
+                "dataset_instrucoes": None,
+                "status_pipeline": "descartado_para_revisao",
             }
 
-        destilacao_input = {
-            "abstract": fase_1["abstract"],
-            "quantidade": 3
-        }
-
+        destilacao_input = {"abstract": fase_1["abstract"], "quantidade": 3}
         tarefas_paralelas = {
             "fase_1": lambda _: fase_1,
             "fase_2": lambda _: fase_2,
         }
 
-        eh_destilavel = fase_2.get("eh_destilavel_pergunta_resposta", False) or fase_2.get("eh_destilavel_chain_of_thought", False)
-        
+        eh_destilavel = fase_2.get("eh_destilavel_pergunta_resposta", False) or \
+                        fase_2.get("eh_destilavel_chain_of_thought", False)
+
         if eh_destilavel:
-            tarefas_paralelas["dataset_instrucoes"] = (lambda _: destilacao_input) | RunnableLambda(gerar_dataset_desacoplado)
+            tarefas_paralelas["dataset_instrucoes"] = (
+                (lambda _: destilacao_input) | RunnableLambda(gerar_dataset_desacoplado)
+            )
         else:
             tarefas_paralelas["dataset_instrucoes"] = lambda _: None
-            
-        tarefas_paralelas["status_pipeline"] = lambda _: "processado_com_sucesso"
 
+        tarefas_paralelas["status_pipeline"] = lambda _: "processado_com_sucesso"
         return RunnableParallel(**tarefas_paralelas)
 
-    full_pipeline = (
-        abstract_prompt | llm | json_parser 
+    return (
+        abstract_prompt | llm | json_parser
         | {
             "fase_1": lambda x: x,
-            "fase_2": {"abstract": lambda x: x["abstract"]} | meta_prompt | llm | json_parser
-          }
+            "fase_2": {"abstract": lambda x: x["abstract"]} | meta_prompt | llm | json_parser,
+        }
         | RunnableLambda(roteador_de_lixo)
     )
-    return full_pipeline
 
-def parse_reasoning_and_answer(response_text):
-    # Try to extract the final conclusion. Fallback to using the entire text.
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def parse_reasoning_and_answer(response_text: str):
     reasoning = response_text
     answer = ""
-    # "Conclusão final:" is a common pattern from the prompt
     if "Conclusão final" in response_text:
         parts = response_text.split("Conclusão final", 1)
         reasoning = parts[0].strip()
         answer = parts[1].strip()
-        if answer.startswith(":"): answer = answer[1:].strip()
+        if answer.startswith(":"):
+            answer = answer[1:].strip()
     return reasoning, answer
 
-def main():
-    bucket_name = os.environ.get("OUTPUT_BUCKET", "mt-airflow")
+
+def init_llm():
+    """Returns (llm, model_name). Tries Ollama first, falls back to Mistral."""
+    try:
+        model_name = "granite4.1:3b"
+        llm = ChatOllama(model=model_name, temperature=0.7, base_url="http://localhost:11434")
+        log.info("LLM iniciado: Ollama %s", model_name)
+        return llm, model_name
+    except Exception as exc:
+        log.warning("Ollama indisponível (%s), usando Mistral como fallback.", exc)
+        model_name = "ministral-3b-2512"
+        llm = ChatMistralAI(model=model_name, temperature=0.7)
+        log.info("LLM iniciado: Mistral %s", model_name)
+        return llm, model_name
+
+
+# ---------------------------------------------------------------------------
+# Core processing function (used by both DAGs)
+# ---------------------------------------------------------------------------
+def process_pending_files(
+    bucket_name: str = "mt-airflow",
+    raw_prefix: str = "raw_corpus/",
+    out_prefix: str = "datasets/pt-br_Q&A/",
+    limit: int | None = None,
+) -> dict:
+    """
+    Descobre quais parquets ainda não foram convertidos em JSONL e processa.
+
+    Returns a summary dict pushed to XCom:
+        {
+            "files_found":      int,
+            "files_skipped":    int,
+            "files_processed":  int,
+            "rows_total":       int,
+            "rows_discarded":   int,
+            "qa_generated":     int,
+            "errors":           list[str],
+        }
+    """
     client = storage.Client()
     bucket = client.bucket(bucket_name)
 
-    raw_prefix = "raw_corpus/"
-    output_prefix = "datasets/pt-br_Q&A/"
+    # ---- listagem --------------------------------------------------------
+    log.info("Listando parquets em gs://%s/%s …", bucket_name, raw_prefix)
+    raw_blobs = [b.name for b in bucket.list_blobs(prefix=raw_prefix) if b.name.endswith(".parquet")]
+    log.info("%d arquivo(s) parquet encontrado(s).", len(raw_blobs))
 
-    print("Listing raw parquet files...")
-    raw_blobs = list(bucket.list_blobs(prefix=raw_prefix))
-    raw_files = [blob.name for blob in raw_blobs if blob.name.endswith(".parquet")]
+    log.info("Listando JSONLs já gerados em gs://%s/%s …", bucket_name, out_prefix)
+    out_basenames = {
+        os.path.basename(b.name)
+        for b in bucket.list_blobs(prefix=out_prefix)
+        if b.name.endswith(".jsonl")
+    }
 
-    print("Listing existing JSONL datasets...")
-    out_blobs = list(bucket.list_blobs(prefix=output_prefix))
-    out_files = [blob.name for blob in out_blobs if blob.name.endswith(".jsonl")]
-    out_basenames = {os.path.basename(f) for f in out_files}
+    pending = [rf for rf in raw_blobs if os.path.basename(rf).replace(".parquet", ".jsonl") not in out_basenames]
+    skipped = len(raw_blobs) - len(pending)
+    log.info("%d arquivo(s) já processado(s) (skip). %d pendente(s).", skipped, len(pending))
 
-    try:
-        # User defined model granite4.1:3b as main, mistral as fallback.
-        llm_model_name = "granite4.1:3b"
-        llm = ChatOllama(model=llm_model_name, temperature=0.7, base_url="http://host.docker.internal:11434")
-    except Exception as e:
-        print(f"Fallback to Mistral due to: {e}")
-        llm_model_name = "ministral-3b-2512"
-        llm = ChatMistralAI(model=llm_model_name, temperature=0.7)
-    
-    # Actually wait, ChatOllama initialization won't fail here if Ollama is down, it fails on invoke.
-    # To properly handle fallback, we'd wrap invoke, but let's keep it simple or implement a check.
-    # We'll just stick to ChatOllama for now as requested.
-    
+    if limit is not None:
+        pending = pending[:limit]
+        log.info("Limitando a %d arquivo(s) (limit=%d).", len(pending), limit)
+
+    if not pending:
+        log.info("Nada a processar. Encerrando.")
+        return {
+            "files_found": len(raw_blobs),
+            "files_skipped": skipped,
+            "files_processed": 0,
+            "rows_total": 0,
+            "rows_discarded": 0,
+            "qa_generated": 0,
+            "errors": [],
+        }
+
+    # ---- modelo ----------------------------------------------------------
+    llm, model_name = init_llm()
     pipeline = build_pipeline(llm)
 
-    for rf in raw_files:
+    # ---- contadores ------------------------------------------------------
+    total_rows = 0
+    total_discarded = 0
+    total_qa = 0
+    files_processed = 0
+    errors = []
+
+    for rf in pending:
         base_name = os.path.basename(rf)
         out_name = base_name.replace(".parquet", ".jsonl")
-        
-        if out_name in out_basenames:
-            print(f"Skipping {base_name}, already processed.")
-            continue
-            
-        print(f"Processing {base_name}...")
         local_parquet = f"/tmp/{base_name}"
-        bucket.blob(rf).download_to_filename(local_parquet)
-        
-        df = pl.read_parquet(local_parquet)
-        
-        # we need texts and sources
-        # schema usually title, text, url
-        if "text" not in df.columns:
-            print(f"Warning: no text column in {base_name}. Skipping.")
+        local_jsonl = f"/tmp/{out_name}"
+
+        log.info("⬇️  Baixando %s …", rf)
+        try:
+            bucket.blob(rf).download_to_filename(local_parquet)
+        except Exception as exc:
+            msg = f"Erro ao baixar {rf}: {exc}"
+            log.error(msg)
+            errors.append(msg)
             continue
-            
+
+        df = pl.read_parquet(local_parquet)
+        n_rows = len(df)
+        total_rows += n_rows
+        log.info("📄 %s — %d linhas.", base_name, n_rows)
+
+        if "text" not in df.columns:
+            msg = f"{base_name}: sem coluna 'text'. Pulando."
+            log.warning(msg)
+            errors.append(msg)
+            os.remove(local_parquet)
+            continue
+
         results_jsonl = []
-        
-        for row in df.iter_rows(named=True):
+        file_discarded = 0
+        file_qa = 0
+
+        for row_idx, row in enumerate(df.iter_rows(named=True)):
             texto = row.get("text", "")
             source = row.get("url", row.get("title", ""))
-            if not texto: continue
-            
+            if not texto:
+                log.debug("Linha %d vazia, pulando.", row_idx)
+                continue
+
             try:
                 res = pipeline.invoke({"texto": texto})
-                
-                if res.get("status_pipeline") == "processado_com_sucesso" and res.get("dataset_instrucoes"):
-                    for qa in res["dataset_instrucoes"]:
+                status = res.get("status_pipeline", "desconhecido")
+
+                if status == "descartado_para_revisao":
+                    file_discarded += 1
+                    log.debug("Linha %d descartada (baixa utilidade).", row_idx)
+                elif status == "processado_com_sucesso":
+                    instrucoes = res.get("dataset_instrucoes") or []
+                    for qa in instrucoes:
                         reasoning, answer = parse_reasoning_and_answer(qa["response"])
                         results_jsonl.append({
-                            "question": qa["instruction"],
+                            "question":  qa["instruction"],
                             "reasoning": reasoning,
-                            "answer": answer,
-                            "model": llm_model_name,
-                            "source": source
+                            "answer":    answer,
+                            "model":     model_name,
+                            "source":    source,
                         })
-            except Exception as e:
-                print(f"Error processing row from {base_name}: {e}")
-                
-        local_jsonl = f"/tmp/{out_name}"
+                        file_qa += 1
+                    log.debug("Linha %d → %d Q&As gerados.", row_idx, len(instrucoes or []))
+                else:
+                    log.warning("Linha %d — status inesperado: %s", row_idx, status)
+
+            except Exception as exc:
+                msg = f"{base_name}[{row_idx}]: {exc}"
+                log.error(msg)
+                log.debug(traceback.format_exc())
+                errors.append(msg)
+
+        total_discarded += file_discarded
+        total_qa += file_qa
+        log.info(
+            "✅ %s processado: %d Q&As gerados, %d descartados.",
+            base_name, file_qa, file_discarded,
+        )
+
+        # ---- salva JSONL -------------------------------------------------
         with open(local_jsonl, "w", encoding="utf-8") as f:
             for item in results_jsonl:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
-                
-        print(f"Uploading {out_name} to GCS...")
-        out_blob = bucket.blob(f"{output_prefix}{out_name}")
-        out_blob.upload_from_filename(local_jsonl)
-        print(f"Finished processing {base_name}.")
-        
-        # Clean up
-        if os.path.exists(local_parquet): os.remove(local_parquet)
-        if os.path.exists(local_jsonl): os.remove(local_jsonl)
+
+        log.info("⬆️  Enviando %s para gs://%s/%s%s …", out_name, bucket_name, out_prefix, out_name)
+        bucket.blob(f"{out_prefix}{out_name}").upload_from_filename(local_jsonl)
+        log.info("☁️  Upload concluído.")
+        files_processed += 1
+
+        # cleanup
+        for f in (local_parquet, local_jsonl):
+            if os.path.exists(f):
+                os.remove(f)
+
+    summary = {
+        "files_found":     len(raw_blobs),
+        "files_skipped":   skipped,
+        "files_processed": files_processed,
+        "rows_total":      total_rows,
+        "rows_discarded":  total_discarded,
+        "qa_generated":    total_qa,
+        "errors":          errors,
+    }
+    log.info("=== RESUMO FINAL === %s", json.dumps(summary, ensure_ascii=False))
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# CLI entrypoint (para uso sem Airflow)
+# ---------------------------------------------------------------------------
+def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+    bucket_name = os.environ.get("OUTPUT_BUCKET", "mt-airflow")
+    summary = process_pending_files(bucket_name=bucket_name)
+    log.info("Concluído. Resumo: %s", summary)
+
 
 if __name__ == "__main__":
     main()

@@ -130,7 +130,7 @@ dags:
     enabled: false
   gitSync:
     enabled: true
-    repo: https://github.com/morescotech/airflow-dags.git
+    repo: https://github.com/giovanimds/mt-airflow.git
     branch: main
     subPath: "dags"
     interval: 60

@@ -10,7 +10,17 @@ import scrapy
 from itemadapter import ItemAdapter
 from scrapy.crawler import CrawlerProcess
 import fitz  # PyMuPDF
+from langdetect import detect, DetectorFactory
 
+DetectorFactory.seed = 0
+
+def detect_language(text: str) -> str:
+    try:
+        if len(text.strip()) < 10:
+            return "unknown"
+        return detect(text)
+    except Exception:
+        return "unknown"
 
 class ParquetChunkPipeline:
     def __init__(self, bucket_name: str | None, chunk_size: int = 50, local_fallback_dir: str = "./output"):
@@ -91,7 +101,7 @@ class WikipediaPTSpider(scrapy.Spider):
                     "title": title,
                     "text": text,
                     "url": f"https://pt.wikipedia.org/wiki/?curid={page_id}",
-                    "language": "pt-br",
+                    "language": detect_language(text),
                     "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
                     "char_count": len(text),
                     "word_count": len(text.split()),
@@ -168,7 +178,7 @@ class ArxivSpider(scrapy.Spider):
                     "title": response.meta.get("title", "ArXiv Document"),
                     "text": full_text,
                     "url": response.meta.get("url"),
-                    "language": "en", # ArXiv is mostly English, but we process it anyway
+                    "language": detect_language(full_text),
                     "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
                     "char_count": len(full_text),
                     "word_count": len(full_text.split()),
@@ -205,7 +215,7 @@ class GutenbergPTSpider(scrapy.Spider):
                 "title": "Gutenberg PT Book",
                 "text": text,
                 "url": response.meta.get("url"),
-                "language": "pt-br",
+                "language": detect_language(text),
                 "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
                 "char_count": len(text),
                 "word_count": len(text.split()),
@@ -252,7 +262,7 @@ class SciELOSpider(scrapy.Spider):
                 "title": title,
                 "text": full_text,
                 "url": response.url,
-                "language": "pt-br",
+                "language": detect_language(full_text),
                 "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
                 "char_count": len(full_text),
                 "word_count": len(full_text.split()),
@@ -300,7 +310,7 @@ class BdtdSpider(scrapy.Spider):
                     "title": "BDTD Thesis/Dissertation",
                     "text": full_text,
                     "url": response.url,
-                    "language": "pt-br",
+                    "language": detect_language(full_text),
                     "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
                     "char_count": len(full_text),
                     "word_count": len(full_text.split()),
@@ -338,7 +348,7 @@ class BolemaSpider(scrapy.Spider):
                 "title": title,
                 "text": full_text,
                 "url": response.url,
-                "language": "pt-br",
+                "language": detect_language(full_text),
                 "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
                 "char_count": len(full_text),
                 "word_count": len(full_text.split()),
@@ -390,7 +400,7 @@ class RematSpider(scrapy.Spider):
                     "title": "REMAT Article",
                     "text": full_text,
                     "url": response.url,
-                    "language": "pt-br",
+                    "language": detect_language(full_text),
                     "extracted_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
                     "char_count": len(full_text),
                     "word_count": len(full_text.split()),

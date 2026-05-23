@@ -3,6 +3,7 @@ import json
 import logging
 import traceback
 import polars as pl
+import urllib.request
 
 from google.cloud import storage
 from langchain_ollama import ChatOllama
@@ -190,16 +191,23 @@ def parse_reasoning_and_answer(response_text: str):
 
 def init_llm():
     """Returns (llm, model_name). Tries Ollama first, falls back to Mistral."""
+    model_name = "granite4.1:3b"
+    ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     try:
-        model_name = "granite4.1:3b"
-        llm = ChatOllama(model=model_name, temperature=0.7, base_url="http://localhost:11434")
-        log.info("LLM iniciado: Ollama %s", model_name)
-        return llm, model_name
+        log.info("Testando conexao com Ollama em: %s", ollama_url)
+        # Envia um GET rapido para testar se o Ollama esta online
+        with urllib.request.urlopen(ollama_url, timeout=2) as response:
+            if response.status == 200:
+                llm = ChatOllama(model=model_name, temperature=0.7, base_url=ollama_url)
+                log.info("LLM iniciado com sucesso: Ollama %s em %s", model_name, ollama_url)
+                return llm, model_name
+            else:
+                raise Exception(f"Status HTTP {response.status}")
     except Exception as exc:
-        log.warning("Ollama indisponível (%s), usando Mistral como fallback.", exc)
+        log.warning("Ollama indisponivel em %s (%s), usando Mistral como fallback.", ollama_url, exc)
         model_name = "ministral-3b-2512"
         llm = ChatMistralAI(model=model_name, temperature=0.7)
-        log.info("LLM iniciado: Mistral %s", model_name)
+        log.info("LLM iniciado com sucesso: Mistral %s", model_name)
         return llm, model_name
 
 

@@ -24,6 +24,14 @@ env:
       langchain-community
       google-cloud-storage
 
+extraEnv: |
+  - name: HOST_IP
+    valueFrom:
+      fieldRef:
+        fieldPath: status.hostIP
+  - name: OLLAMA_BASE_URL
+    value: http://$(HOST_IP):11434
+
 volumes:
   - name: gcp-service-account
     secret:

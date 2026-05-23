@@ -111,7 +111,22 @@ str_parser = StrOutputParser()
 # Pipeline builder
 # ---------------------------------------------------------------------------
 def build_pipeline(llm):
-    chain_perguntas = qa_prompt | llm | json_parser
+    # Detecta se é ChatOllama e aplica o bind adequado para forçar JSON estruturado
+    try:
+        from langchain_ollama import ChatOllama
+        is_ollama = isinstance(llm, ChatOllama)
+    except ImportError:
+        is_ollama = False
+
+    if is_ollama:
+        llm_json = llm.bind(format="json")
+    else:
+        try:
+            llm_json = llm.bind(response_format={"type": "json_object"})
+        except Exception:
+            llm_json = llm
+
+    chain_perguntas = qa_prompt | llm_json | json_parser
     chain_resposta = solucionador_prompt | llm | str_parser
 
     def gerar_dataset_desacoplado(inputs):
@@ -165,10 +180,10 @@ def build_pipeline(llm):
         return RunnableParallel(**tarefas_paralelas)
 
     return (
-        abstract_prompt | llm | json_parser
+        abstract_prompt | llm_json | json_parser
         | {
             "fase_1": lambda x: x,
-            "fase_2": {"abstract": lambda x: x["abstract"]} | meta_prompt | llm | json_parser,
+            "fase_2": {"abstract": lambda x: x["abstract"]} | meta_prompt | llm_json | json_parser,
         }
         | RunnableLambda(roteador_de_lixo)
     )

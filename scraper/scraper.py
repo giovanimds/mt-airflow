@@ -180,7 +180,7 @@ class GutenbergPTSpider(scrapy.Spider):
     def parse(self, response):
         # Extract book links from the language page
         # Example format: <li class="extiw"><a href="/ebooks/25641">A abelhinha</a>
-        book_links = response.css("li.extiw a::attr(href)").getall()
+        book_links = response.css("li.pgdbetext a::attr(href)").getall()
         for link in book_links:
             if link.startswith("/ebooks/"):
                 book_id = link.split("/")[-1]
@@ -213,7 +213,7 @@ if __name__ == "__main__":
     spider_name = os.environ.get("SPIDER_NAME", "wikipedia_pt")
     
     settings = {
-        "ROBOTSTXT_OBEY": True,
+        "ROBOTSTXT_OBEY": False,
         "CONCURRENT_REQUESTS": 8,
         "DOWNLOAD_DELAY": 1.0,  # Atraso educado de 1s entre requisições
         "ITEM_PIPELINES": {

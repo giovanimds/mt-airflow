@@ -6,11 +6,11 @@ import polars as pl
 import urllib.request
 
 from google.cloud import storage
+from pydantic import BaseModel, Field
 from langchain_ollama import ChatOllama
 from langchain_mistralai import ChatMistralAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.runnables import RunnableLambda, RunnableParallel
 
 log = logging.getLogger(__name__)
@@ -20,9 +20,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 abstract_prompt = ChatPromptTemplate.from_template(
     """Você é um assistente especializado em mineração de dados acadêmicos. 
-Analise o texto bruto fornecido e retorne APENAS um objeto JSON contendo duas chaves:
-1. "abstract": O resumo do artigo científico isolado de qualquer texto de interface ou rodapé.
-2. "keywords": Uma lista com as palavras-chave explícitas no texto.
+Analise o texto bruto fornecido e extraia o resumo e as palavras-chave.
 
 Ignore completamente endereços, e-mails, instruções de navegação de sites e direitos de acesso.
 Não traduza o texto, apenas extraia as informações solicitadas.
@@ -33,23 +31,10 @@ Texto Bruto:
 )
 
 meta_prompt = ChatPromptTemplate.from_template(
-    """Com base no resumo acadêmico fornecido, extraia os metadados metodológicos no formato JSON estrito abaixo:
-
-{{
-  "publico_alvo": "",
-  "conclusoes_principais": "",
-  "eh_ponderativo": true/false,
-  "eh_exploratorio": true/false,
-  "eh_especulativo": true/false,
-  "eh_embasado_em_dados": true/false,
-  "eh_destilavel_pergunta_resposta": true/false,
-  "eh_destilavel_chain_of_thought": true/false,
-  "eh_desprovido_de_utilidade_pratica": true/false
-}}
+    """Com base no resumo acadêmico fornecido, extraia os metadados metodológicos solicitados.
 
 Regras:
-- Se uma informação não estiver explícita, preencha com null ou array vazio.
-- Responda estritamente com o JSON, sem explicações adicionais.
+- Se uma informação não estiver explícita, preencha o campo de forma vazia ou nula.
 - Preencha os alvos sempre em pt-BR, mesmo que o texto esteja em outro idioma.
 - eh_ponderativo é true se o artigo fizer uma análise crítica ou reflexão profunda sobre um tema.
 - eh_exploratorio é true se o artigo apresentar um estudo exploratório, levantamento de dados ou análise de campo.
@@ -80,13 +65,6 @@ qa_prompt = ChatPromptTemplate.from_template(
     Exemplos ruins:
     "Em um artigo sobre ...", "Segundo um estudo recente ...", "De acordo com um artigo científico ..."
 
-    Retorne APENAS uma lista JSON com o formato:
-    [
-      {{
-        "pergunta": "Pergunta contextualizada em pt-BR"
-      }}
-    ]
-
     Resumo:
     {abstract}
     """
@@ -95,72 +73,75 @@ qa_prompt = ChatPromptTemplate.from_template(
 solucionador_prompt = ChatPromptTemplate.from_template(
     """Você é um pesquisador sênior respondendo a uma dúvida acadêmica.
 
-    Escreva sua linha de raciocínio passo a passo dentro da tag <raciocinio>...</raciocinio> (Identificação da intenção -> Raciocínio -> Resposta -> Revisão).
-    Fora e após o fechamento da tag </raciocinio>, forneça a conclusão/resposta final direta e detalhada.
-
-    Exemplo de formato de saída:
-    <raciocinio>
-    [Sua linha de raciocínio passo a passo aqui]
-    </raciocinio>
-    [Sua conclusão/resposta final direta aqui]
+    Escreva sua linha de raciocínio passo a passo (Identificação da intenção -> Raciocínio -> Resposta -> Revisão)
+    e depois forneça a conclusão/resposta final direta e detalhada.
 
     Pergunta: {pergunta}
     """
 )
 
-json_parser = JsonOutputParser()
-str_parser = StrOutputParser()
+# ---------------------------------------------------------------------------
+# Schemas (Pydantic)
+# ---------------------------------------------------------------------------
+class AbstractResult(BaseModel):
+    abstract: str = Field(description="O resumo do artigo científico isolado de qualquer texto de interface ou rodapé. Vazio se não for encontrado.")
+    keywords: list[str] = Field(description="Uma lista com as palavras-chave explícitas no texto.")
+
+class MetaResult(BaseModel):
+    publico_alvo: str | None = Field(default=None)
+    conclusoes_principais: str | None = Field(default=None)
+    eh_ponderativo: bool = Field(default=False)
+    eh_exploratorio: bool = Field(default=False)
+    eh_especulativo: bool = Field(default=False)
+    eh_embasado_em_dados: bool = Field(default=False)
+    eh_destilavel_pergunta_resposta: bool = Field(default=False)
+    eh_destilavel_chain_of_thought: bool = Field(default=False)
+    eh_desprovido_de_utilidade_pratica: bool = Field(default=False)
+
+class QuestionItem(BaseModel):
+    pergunta: str = Field(description="Pergunta contextualizada em pt-BR")
+
+class QuestionsList(BaseModel):
+    perguntas: list[QuestionItem]
+
+class QAResult(BaseModel):
+    reasoning: str = Field(description="Sua linha de raciocínio passo a passo detalhada e profunda")
+    answer: str = Field(description="Sua conclusão ou resposta final direta e detalhada")
+
+
+def get_field(obj, field_name, default=""):
+    if isinstance(obj, dict):
+        return obj.get(field_name, default)
+    return getattr(obj, field_name, default)
 
 
 # ---------------------------------------------------------------------------
 # Pipeline builder
 # ---------------------------------------------------------------------------
 def build_pipeline(llm):
-    # Detecta se é ChatOllama e aplica o bind adequado para forçar JSON estruturado
-    try:
-        from langchain_ollama import ChatOllama
-        is_ollama = isinstance(llm, ChatOllama)
-    except ImportError:
-        is_ollama = False
-
-    if is_ollama:
-        llm_json = llm.bind(format="json")
-    else:
-        try:
-            llm_json = llm.bind(response_format={"type": "json_object"})
-        except Exception:
-            llm_json = llm
-
-    chain_perguntas = qa_prompt | llm_json | json_parser
-    chain_resposta = solucionador_prompt | llm | str_parser
+    chain_perguntas = qa_prompt | llm.with_structured_output(QuestionsList)
+    chain_resposta = solucionador_prompt | llm.with_structured_output(QAResult)
 
     def gerar_dataset_desacoplado(inputs):
         resultado_perguntas = chain_perguntas.invoke(inputs)
-        if isinstance(resultado_perguntas, dict):
-            lista_perguntas = resultado_perguntas.get("perguntas", [])
-        elif isinstance(resultado_perguntas, list):
-            lista_perguntas = resultado_perguntas
-        else:
-            lista_perguntas = []
+        lista_perguntas = get_field(resultado_perguntas, "perguntas", []) if resultado_perguntas else []
 
         dataset = []
         for p in lista_perguntas:
-            p_text = p.get("pergunta", "") if isinstance(p, dict) else str(p)
+            p_text = get_field(p, "pergunta", "")
             if not p_text:
                 continue
             resposta = chain_resposta.invoke({"pergunta": p_text})
-            dataset.append({"instruction": p_text, "response": resposta})
+            if resposta:
+                dataset.append({"instruction": p_text, "response": resposta})
         return dataset
 
     def roteador_de_lixo(inputs):
-        fase_1 = inputs.get("fase_1", {})
-        fase_2 = inputs.get("fase_2", {})
-        if not isinstance(fase_1, dict):
-            fase_1 = {"abstract": str(fase_1) if fase_1 is not None else "", "keywords": []}
-        if not isinstance(fase_2, dict):
-            fase_2 = {}
-
-        eh_lixo = fase_2.get("eh_desprovido_de_utilidade_pratica", False) or not fase_1.get("abstract")
+        fase_1 = inputs.get("fase_1")
+        fase_2 = inputs.get("fase_2")
+        
+        abstract_text = get_field(fase_1, "abstract", "") if fase_1 else ""
+        eh_lixo = get_field(fase_2, "eh_desprovido_de_utilidade_pratica", False) or not abstract_text
 
         if eh_lixo:
             return {
@@ -170,13 +151,12 @@ def build_pipeline(llm):
                 "status_pipeline": "descartado_para_revisao",
             }
 
-        destilacao_input = {"abstract": fase_1.get("abstract", "") if isinstance(fase_1, dict) else "", "quantidade": 3}
+        destilacao_input = {"abstract": abstract_text, "quantidade": 3}
         tarefas_paralelas = {
             "fase_1": lambda _: fase_1,
             "fase_2": lambda _: fase_2,
         }
 
-        # Geramos as Q&As para qualquer artigo com utilidade prática (não-lixo)
         tarefas_paralelas["dataset_instrucoes"] = (
             (lambda _: destilacao_input) | RunnableLambda(gerar_dataset_desacoplado)
         )
@@ -185,74 +165,16 @@ def build_pipeline(llm):
         return RunnableParallel(**tarefas_paralelas)
 
     return (
-        abstract_prompt | llm_json | json_parser
+        abstract_prompt | llm.with_structured_output(AbstractResult)
         | {
             "fase_1": lambda x: x,
-            "fase_2": {"abstract": lambda x: x.get("abstract", "") if isinstance(x, dict) else ""} | meta_prompt | llm_json | json_parser,
+            "fase_2": {"abstract": lambda x: get_field(x, "abstract", "") if x else ""} | meta_prompt | llm.with_structured_output(MetaResult),
         }
         | RunnableLambda(roteador_de_lixo)
     )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def parse_reasoning_and_answer(response_text: str):
-    import re
 
-    # Procura pela tag <raciocinio>...</raciocinio>
-    match = re.search(r"<raciocinio>(.*?)</raciocinio>", response_text, re.DOTALL | re.IGNORECASE)
-
-    if match:
-        reasoning = match.group(1).strip()
-        end_idx = match.end()
-        answer = response_text[end_idx:].strip()
-        
-        # Se por acaso a resposta ficou vazia, mas há texto antes de <raciocinio>
-        if not answer:
-            start_idx = match.start()
-            answer = response_text[:start_idx].strip()
-            
-        if reasoning or answer:
-            return reasoning, answer
-
-    # Caso o modelo tenha esquecido de fechar a tag (apenas <raciocinio> presente)
-    if "<raciocinio>" in response_text.lower():
-        parts = re.split(r"<raciocinio>", response_text, maxsplit=1, flags=re.IGNORECASE)
-        remaining = parts[1]
-        for separator in [
-            "Conclusão final:", "Conclusão final",
-            "Conclusao final:", "Conclusao final",
-            "Conclusão:", "Conclusao:",
-            "Resposta:", "Resposta",
-            "Final Answer:", "Final Answer"
-        ]:
-            pattern = rf"\*?\*?\s*{re.escape(separator)}\s*\*?\*?"
-            subparts = re.split(pattern, remaining, maxsplit=1, flags=re.IGNORECASE)
-            if len(subparts) == 2:
-                return subparts[0].strip(), subparts[1].strip()
-        return remaining.strip(), response_text.strip()
-
-    # Fallback clássico se não houver a tag <raciocinio>
-    for separator in [
-        "Conclusão final:", "Conclusão final",
-        "Conclusao final:", "Conclusao final",
-        "Conclusão:", "Conclusao:",
-        "Resposta:", "Resposta",
-        "Final Answer:", "Final Answer"
-    ]:
-        pattern = rf"\*?\*?\s*{re.escape(separator)}\s*\*?\*?"
-        parts = re.split(pattern, response_text, maxsplit=1, flags=re.IGNORECASE)
-        if len(parts) == 2:
-            reasoning = parts[0].strip()
-            answer = parts[1].strip()
-            if answer.startswith(":"):
-                answer = answer[1:].strip()
-            return reasoning, answer
-
-    # Fallback supremo: se não houver divisão alguma, o reasoning é o texto original
-    # e a answer é o texto original (para evitar salvar campos de resposta vazios)
-    return response_text, response_text
 
 
 def init_llm(provider: str = "ollama", model_name: str = "granite4.1:3b"):
@@ -440,11 +362,11 @@ def process_pending_files(
                 elif status == "processado_com_sucesso":
                     instrucoes = res.get("dataset_instrucoes") or []
                     for qa in instrucoes:
-                        reasoning, answer = parse_reasoning_and_answer(qa["response"])
+                        resposta_obj = qa["response"]
                         results_jsonl.append({
                             "question":  qa["instruction"],
-                            "reasoning": reasoning,
-                            "answer":    answer,
+                            "reasoning": get_field(resposta_obj, "reasoning", ""),
+                            "answer":    get_field(resposta_obj, "answer", ""),
                             "model":     model_name,
                             "source":    source,
                         })

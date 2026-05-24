@@ -36,7 +36,7 @@ def _backfill(**context):
     params = context.get("params", {})
     llm_provider = params.get("llm_provider", "ollama")
     llm_model_selected = params.get("llm_model", "granite4.1:3b")
-    custom_llm_model = params.get("custom_llm_model", "").strip()
+    custom_llm_model = (params.get("custom_llm_model") or "").strip()
 
     if llm_model_selected == "Customizado (digitar no campo abaixo)":
         if custom_llm_model:
@@ -105,8 +105,8 @@ with DAG(
             description="Modelo da LLM a ser utilizado (ou escolha 'Customizado' para digitar abaixo)",
         ),
         "custom_llm_model": Param(
-            "",
-            type="string",
+            None,
+            type=["string", "null"],
             description="Caso tenha escolhido 'Customizado' no campo acima, digite o modelo (Ex: gemini-3.5-flash, gemini-3.1-flash-lite)",
         ),
     },

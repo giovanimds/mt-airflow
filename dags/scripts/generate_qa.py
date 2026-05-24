@@ -8,6 +8,7 @@ import urllib.request
 from google.cloud import storage
 from langchain_ollama import ChatOllama
 from langchain_mistralai import ChatMistralAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from langchain_core.runnables import RunnableLambda, RunnableParallel
@@ -204,8 +205,21 @@ def parse_reasoning_and_answer(response_text: str):
     return reasoning, answer
 
 
-def init_llm(model_name: str = "granite4.1:3b"):
-    """Returns (llm, model_name). Tries Ollama first, falls back to Mistral."""
+def init_llm(provider: str = "ollama", model_name: str = "granite4.1:3b"):
+    """Returns (llm, model_name). Supports ollama and gemini, with fallback to Mistral."""
+    if provider.lower() == "gemini":
+        try:
+            llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.7)
+            log.info("LLM iniciado com sucesso: Gemini %s", model_name)
+            return llm, model_name
+        except Exception as exc:
+            log.warning("Gemini indisponivel %s (%s), usando Mistral como fallback.", model_name, exc)
+            fallback_model_name = "ministral-3b-2512"
+            llm = ChatMistralAI(model=fallback_model_name, temperature=0.7)
+            log.info("LLM iniciado com sucesso: Mistral %s", fallback_model_name)
+            return llm, fallback_model_name
+
+    # Default: ollama
     ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     try:
         log.info("Testando conexao com Ollama em: %s", ollama_url)
@@ -233,6 +247,7 @@ def process_pending_files(
     raw_prefix: str = "raw_corpus/",
     out_prefix: str = "datasets/pt-br_Q&A/",
     limit: int | None = None,
+    provider: str = "ollama",
     model_name: str = "granite4.1:3b",
 ) -> dict:
     """
@@ -285,7 +300,7 @@ def process_pending_files(
         }
 
     # ---- modelo ----------------------------------------------------------
-    llm, model_name = init_llm(model_name=model_name)
+    llm, model_name = init_llm(provider=provider, model_name=model_name)
     pipeline = build_pipeline(llm)
 
     # ---- contadores ------------------------------------------------------

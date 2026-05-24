@@ -34,14 +34,16 @@ def _backfill(**context):
     from generate_qa import process_pending_files  # noqa: PLC0415
 
     params = context.get("params", {})
-    ollama_model = params.get("ollama_model", "granite4.1:3b")
+    llm_provider = params.get("llm_provider", "ollama")
+    llm_model = params.get("llm_model", "granite4.1:3b")
 
-    log.info("Iniciando backfill em gs://%s/%s com o modelo %s", GCS_BUCKET, RAW_PREFIX, ollama_model)
+    log.info("Iniciando backfill em gs://%s/%s com o provedor %s e modelo %s", GCS_BUCKET, RAW_PREFIX, llm_provider, llm_model)
     summary = process_pending_files(
         bucket_name=GCS_BUCKET,
         raw_prefix=RAW_PREFIX,
         out_prefix=OUT_PREFIX,
-        model_name=ollama_model,
+        provider=llm_provider,
+        model_name=llm_model,
     )
 
     # Pusha o resumo para XCom (visível na UI do Airflow)
@@ -74,7 +76,8 @@ with DAG(
     max_active_runs=1,   # garante que não rode em paralelo
     default_args={"owner": "dataset-builder"},
     params={
-        "ollama_model": Param("granite4.1:3b", type="string", description="Modelo Ollama a ser utilizado"),
+        "llm_provider": Param("ollama", type="string", enum=["ollama", "gemini"], description="Provedor de LLM a ser utilizado"),
+        "llm_model": Param("granite4.1:3b", type="string", description="Nome do modelo da LLM (Ex: granite4.1:3b para Ollama ou gemini-2.5-flash para Gemini)"),
     },
     tags=["dataset-builder", "qa", "backfill"],
 ) as dag:

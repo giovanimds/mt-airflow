@@ -14,6 +14,11 @@ config:
 env:
   - name: GOOGLE_APPLICATION_CREDENTIALS
     value: /opt/airflow/secrets/gcp/service-account.json
+  - name: GOOGLE_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: gemini-secrets
+        key: google-api-key
   # Pacotes instalados automaticamente em todos os pods (worker, scheduler, etc.)
   # O Helm chart do Airflow lê esta variável e executa pip install no startup.
   - name: _PIP_ADDITIONAL_REQUIREMENTS

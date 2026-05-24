@@ -171,15 +171,10 @@ def build_pipeline(llm):
             "fase_2": lambda _: fase_2,
         }
 
-        eh_destilavel = fase_2.get("eh_destilavel_pergunta_resposta", False) or \
-                        fase_2.get("eh_destilavel_chain_of_thought", False)
-
-        if eh_destilavel:
-            tarefas_paralelas["dataset_instrucoes"] = (
-                (lambda _: destilacao_input) | RunnableLambda(gerar_dataset_desacoplado)
-            )
-        else:
-            tarefas_paralelas["dataset_instrucoes"] = lambda _: None
+        # Geramos as Q&As para qualquer artigo com utilidade prática (não-lixo)
+        tarefas_paralelas["dataset_instrucoes"] = (
+            (lambda _: destilacao_input) | RunnableLambda(gerar_dataset_desacoplado)
+        )
 
         tarefas_paralelas["status_pipeline"] = lambda _: "processado_com_sucesso"
         return RunnableParallel(**tarefas_paralelas)

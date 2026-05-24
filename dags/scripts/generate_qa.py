@@ -95,15 +95,14 @@ qa_prompt = ChatPromptTemplate.from_template(
 solucionador_prompt = ChatPromptTemplate.from_template(
     """Você é um pesquisador sênior respondendo a uma dúvida acadêmica.
 
-    Escreva sua resposta estruturada obrigatoriamente usando as seguintes tags XML:
-    <raciocinio>
-    Explique aqui detalhadamente a sua linha de raciocínio passo a passo (Identificação da intenção -> Raciocínio -> Resposta -> Revisão).
-    </raciocinio>
-    <conclusao>
-    Forneça aqui a conclusão/resposta final direta e detalhada baseada no raciocínio acima.
-    </conclusao>
+    Escreva sua linha de raciocínio passo a passo dentro da tag <raciocinio>...</raciocinio> (Identificação da intenção -> Raciocínio -> Resposta -> Revisão).
+    Fora e após o fechamento da tag </raciocinio>, forneça a conclusão/resposta final direta e detalhada.
 
-    Atenção: Você DEVE incluir as tags <raciocinio> e <conclusao> em sua resposta.
+    Exemplo de formato de saída:
+    <raciocinio>
+    [Sua linha de raciocínio passo a passo aqui]
+    </raciocinio>
+    [Sua conclusão/resposta final direta aqui]
 
     Pergunta: {pergunta}
     """
@@ -201,31 +200,40 @@ def build_pipeline(llm):
 def parse_reasoning_and_answer(response_text: str):
     import re
 
-    # Procura as tags tolerando a falta de fecho
-    raciocinio_match = re.search(r"<raciocinio>(.*?)(?:</raciocinio>|<conclusao>|$)", response_text, re.DOTALL | re.IGNORECASE)
-    conclusao_match = re.search(r"<conclusao>(.*?)(?:</conclusao>|<raciocinio>|$)", response_text, re.DOTALL | re.IGNORECASE)
+    # Procura pela tag <raciocinio>...</raciocinio>
+    match = re.search(r"<raciocinio>(.*?)</raciocinio>", response_text, re.DOTALL | re.IGNORECASE)
 
-    if raciocinio_match and conclusao_match:
-        reasoning = raciocinio_match.group(1).strip()
-        answer = conclusao_match.group(1).strip()
+    if match:
+        reasoning = match.group(1).strip()
+        end_idx = match.end()
+        answer = response_text[end_idx:].strip()
+        
+        # Se por acaso a resposta ficou vazia, mas há texto antes de <raciocinio>
+        if not answer:
+            start_idx = match.start()
+            answer = response_text[:start_idx].strip()
+            
         if reasoning or answer:
             return reasoning, answer
 
-    # Se apenas a tag de raciocínio foi encontrada
-    if raciocinio_match and raciocinio_match.group(1).strip():
-        reasoning = raciocinio_match.group(1).strip()
-        remaining = response_text.replace(raciocinio_match.group(0), "").strip()
-        remaining = re.sub(r"</?conclusao>", "", remaining, flags=re.IGNORECASE).strip()
-        return reasoning, remaining
+    # Caso o modelo tenha esquecido de fechar a tag (apenas <raciocinio> presente)
+    if "<raciocinio>" in response_text.lower():
+        parts = re.split(r"<raciocinio>", response_text, maxsplit=1, flags=re.IGNORECASE)
+        remaining = parts[1]
+        for separator in [
+            "Conclusão final:", "Conclusão final",
+            "Conclusao final:", "Conclusao final",
+            "Conclusão:", "Conclusao:",
+            "Resposta:", "Resposta",
+            "Final Answer:", "Final Answer"
+        ]:
+            pattern = rf"\*?\*?\s*{re.escape(separator)}\s*\*?\*?"
+            subparts = re.split(pattern, remaining, maxsplit=1, flags=re.IGNORECASE)
+            if len(subparts) == 2:
+                return subparts[0].strip(), subparts[1].strip()
+        return remaining.strip(), response_text.strip()
 
-    # Se apenas a tag de conclusão foi encontrada
-    if conclusao_match and conclusao_match.group(1).strip():
-        answer = conclusao_match.group(1).strip()
-        remaining = response_text.replace(conclusao_match.group(0), "").strip()
-        remaining = re.sub(r"</?raciocinio>", "", remaining, flags=re.IGNORECASE).strip()
-        return remaining, answer
-
-    # Fallback se não encontrar tags: procura delimitadores textuais comuns
+    # Fallback clássico se não houver a tag <raciocinio>
     for separator in [
         "Conclusão final:", "Conclusão final",
         "Conclusao final:", "Conclusao final",

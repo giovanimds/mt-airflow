@@ -331,15 +331,47 @@ def process_pending_files(
         file_discarded = 0
         file_qa = 0
 
+        BATCH_SIZE = 4
+        rows_to_process = []
         for row_idx, row in enumerate(df.iter_rows(named=True)):
             texto = row.get("text", "")
             source = row.get("url", row.get("title", ""))
             if not texto:
                 log.debug("Linha %d vazia, pulando.", row_idx)
                 continue
+            rows_to_process.append({
+                "row_idx": row_idx,
+                "texto": texto,
+                "source": source
+            })
+
+        for i in range(0, len(rows_to_process), BATCH_SIZE):
+            batch = rows_to_process[i : i + BATCH_SIZE]
+            batch_inputs = [{"texto": item["texto"]} for item in batch]
 
             try:
-                res = pipeline.invoke({"texto": texto})
+                batch_results = pipeline.batch(batch_inputs, return_exceptions=True)
+            except Exception as exc:
+                log.exception("Erro fatal ao processar lote %d-%d do arquivo %s.", i, i + len(batch) - 1, base_name)
+                for item in batch:
+                    errors.append(f"{base_name}[{item['row_idx']}]: Lote falhou — {exc}")
+                continue
+
+            for item, res in zip(batch, batch_results):
+                row_idx = item["row_idx"]
+                source = item["source"]
+                texto = item["texto"]
+
+                if isinstance(res, Exception):
+                    log.exception("Erro ao processar linha %d do arquivo %s. Texto original (primeiros 300 caracteres): %r", row_idx, base_name, texto[:300], exc_info=res)
+                    msg = f"{base_name}[{row_idx}]: {res}"
+                    errors.append(msg)
+                    continue
+
+                if not isinstance(res, dict):
+                    log.warning("Linha %d — resultado inválido (não é dict): %s", row_idx, type(res))
+                    continue
+
                 status = res.get("status_pipeline", "desconhecido")
 
                 if status == "descartado_para_revisao":
@@ -360,11 +392,6 @@ def process_pending_files(
                     log.debug("Linha %d → %d Q&As gerados.", row_idx, len(instrucoes or []))
                 else:
                     log.warning("Linha %d — status inesperado: %s", row_idx, status)
-
-            except Exception as exc:
-                log.exception("Erro ao processar linha %d do arquivo %s. Texto original (primeiros 300 caracteres): %r", row_idx, base_name, texto[:300])
-                msg = f"{base_name}[{row_idx}]: {exc}"
-                errors.append(msg)
 
         total_discarded += file_discarded
         total_qa += file_qa

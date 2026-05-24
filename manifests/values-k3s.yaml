@@ -3,6 +3,8 @@ allowPodLaunching: true
 allowJobLaunching: true
 
 config:
+  core:
+    hostname_callable: 'airflow.utils.net.get_host_ip_address'
   logging:
     remote_logging: 'True'
     remote_base_log_folder: 'gs://mt-airflow/logs'

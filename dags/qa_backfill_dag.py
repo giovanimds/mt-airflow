@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
+from airflow.models.param import Param
 
 log = logging.getLogger(__name__)
 
@@ -32,11 +33,15 @@ def _backfill(**context):
 
     from generate_qa import process_pending_files  # noqa: PLC0415
 
-    log.info("Iniciando backfill em gs://%s/%s", GCS_BUCKET, RAW_PREFIX)
+    params = context.get("params", {})
+    ollama_model = params.get("ollama_model", "granite4.1:3b")
+
+    log.info("Iniciando backfill em gs://%s/%s com o modelo %s", GCS_BUCKET, RAW_PREFIX, ollama_model)
     summary = process_pending_files(
         bucket_name=GCS_BUCKET,
         raw_prefix=RAW_PREFIX,
         out_prefix=OUT_PREFIX,
+        model_name=ollama_model,
     )
 
     # Pusha o resumo para XCom (visível na UI do Airflow)
@@ -68,6 +73,9 @@ with DAG(
     catchup=False,
     max_active_runs=1,   # garante que não rode em paralelo
     default_args={"owner": "dataset-builder"},
+    params={
+        "ollama_model": Param("granite4.1:3b", type="string", description="Modelo Ollama a ser utilizado"),
+    },
     tags=["dataset-builder", "qa", "backfill"],
 ) as dag:
 

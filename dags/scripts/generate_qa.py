@@ -204,9 +204,8 @@ def parse_reasoning_and_answer(response_text: str):
     return reasoning, answer
 
 
-def init_llm():
+def init_llm(model_name: str = "granite4.1:3b"):
     """Returns (llm, model_name). Tries Ollama first, falls back to Mistral."""
-    model_name = "granite4.1:3b"
     ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
     try:
         log.info("Testando conexao com Ollama em: %s", ollama_url)
@@ -220,10 +219,10 @@ def init_llm():
                 raise Exception(f"Status HTTP {response.status}")
     except Exception as exc:
         log.warning("Ollama indisponivel em %s (%s), usando Mistral como fallback.", ollama_url, exc)
-        model_name = "ministral-3b-2512"
-        llm = ChatMistralAI(model=model_name, temperature=0.7)
-        log.info("LLM iniciado com sucesso: Mistral %s", model_name)
-        return llm, model_name
+        fallback_model_name = "ministral-3b-2512"
+        llm = ChatMistralAI(model=fallback_model_name, temperature=0.7)
+        log.info("LLM iniciado com sucesso: Mistral %s", fallback_model_name)
+        return llm, fallback_model_name
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +233,7 @@ def process_pending_files(
     raw_prefix: str = "raw_corpus/",
     out_prefix: str = "datasets/pt-br_Q&A/",
     limit: int | None = None,
+    model_name: str = "granite4.1:3b",
 ) -> dict:
     """
     Descobre quais parquets ainda não foram convertidos em JSONL e processa.
@@ -285,7 +285,7 @@ def process_pending_files(
         }
 
     # ---- modelo ----------------------------------------------------------
-    llm, model_name = init_llm()
+    llm, model_name = init_llm(model_name=model_name)
     pipeline = build_pipeline(llm)
 
     # ---- contadores ------------------------------------------------------

@@ -35,7 +35,16 @@ def _process_new_chunks(**context):
 
     params = context.get("params", {})
     llm_provider = params.get("llm_provider", "ollama")
-    llm_model = params.get("llm_model", "granite4.1:3b")
+    llm_model_selected = params.get("llm_model", "granite4.1:3b")
+    custom_llm_model = params.get("custom_llm_model", "").strip()
+
+    if llm_model_selected == "Customizado (digitar no campo abaixo)":
+        if custom_llm_model:
+            llm_model = custom_llm_model
+        else:
+            llm_model = "gemini-2.5-flash" if llm_provider == "gemini" else "granite4.1:3b"
+    else:
+        llm_model = llm_model_selected
 
     log.info(
         "qa_generator_dag iniciado — verificando novos chunks em gs://%s/%s com o provedor %s e modelo %s",
@@ -87,11 +96,21 @@ with DAG(
                 "granite4.1:3b",
                 "granite4.1:8b",
                 "gemini-2.5-flash",
-                "gemini-1.5-flash",
                 "gemini-2.5-pro",
+                "gemini-1.5-flash",
                 "gemini-1.5-pro",
+                "gemini-2.0-flash-lite",
+                "flash-latest",
+                "flash-lite-latest",
+                "pro-latest",
+                "Customizado (digitar no campo abaixo)",
             ],
-            description="Modelo da LLM a ser utilizado (selecione de acordo com o provedor)",
+            description="Modelo da LLM a ser utilizado (ou escolha 'Customizado' para digitar abaixo)",
+        ),
+        "custom_llm_model": Param(
+            "",
+            type="string",
+            description="Caso tenha escolhido 'Customizado' no campo acima, digite o modelo (Ex: gemini-3.5-flash, gemini-3.1-flash-lite)",
         ),
     },
     tags=["dataset-builder", "qa", "generation", "sensor"],

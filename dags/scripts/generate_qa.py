@@ -94,11 +94,16 @@ qa_prompt = ChatPromptTemplate.from_template(
 
 solucionador_prompt = ChatPromptTemplate.from_template(
     """Você é um pesquisador sênior respondendo a uma dúvida acadêmica.
-    Explique sua linha de raciocínio passo a passo antes de dar a conclusão final.
 
-    REGRAS:
-    - Raciocinio: **Identificação da intenção** → **Raciocínando** → **Resposta** → **Revisão**
-    - Conclusão final: A resposta final baseada no raciocínio
+    Escreva sua resposta estruturada obrigatoriamente usando as seguintes tags XML:
+    <raciocinio>
+    Explique aqui detalhadamente a sua linha de raciocínio passo a passo (Identificação da intenção -> Raciocínio -> Resposta -> Revisão).
+    </raciocinio>
+    <conclusao>
+    Forneça aqui a conclusão/resposta final direta e detalhada baseada no raciocínio acima.
+    </conclusao>
+
+    Atenção: Você DEVE incluir as tags <raciocinio> e <conclusao> em sua resposta.
 
     Pergunta: {pergunta}
     """
@@ -194,15 +199,52 @@ def build_pipeline(llm):
 # Helpers
 # ---------------------------------------------------------------------------
 def parse_reasoning_and_answer(response_text: str):
-    reasoning = response_text
-    answer = ""
-    if "Conclusão final" in response_text:
-        parts = response_text.split("Conclusão final", 1)
-        reasoning = parts[0].strip()
-        answer = parts[1].strip()
-        if answer.startswith(":"):
-            answer = answer[1:].strip()
-    return reasoning, answer
+    import re
+
+    # Procura as tags tolerando a falta de fecho
+    raciocinio_match = re.search(r"<raciocinio>(.*?)(?:</raciocinio>|<conclusao>|$)", response_text, re.DOTALL | re.IGNORECASE)
+    conclusao_match = re.search(r"<conclusao>(.*?)(?:</conclusao>|<raciocinio>|$)", response_text, re.DOTALL | re.IGNORECASE)
+
+    if raciocinio_match and conclusao_match:
+        reasoning = raciocinio_match.group(1).strip()
+        answer = conclusao_match.group(1).strip()
+        if reasoning or answer:
+            return reasoning, answer
+
+    # Se apenas a tag de raciocínio foi encontrada
+    if raciocinio_match and raciocinio_match.group(1).strip():
+        reasoning = raciocinio_match.group(1).strip()
+        remaining = response_text.replace(raciocinio_match.group(0), "").strip()
+        remaining = re.sub(r"</?conclusao>", "", remaining, flags=re.IGNORECASE).strip()
+        return reasoning, remaining
+
+    # Se apenas a tag de conclusão foi encontrada
+    if conclusao_match and conclusao_match.group(1).strip():
+        answer = conclusao_match.group(1).strip()
+        remaining = response_text.replace(conclusao_match.group(0), "").strip()
+        remaining = re.sub(r"</?raciocinio>", "", remaining, flags=re.IGNORECASE).strip()
+        return remaining, answer
+
+    # Fallback se não encontrar tags: procura delimitadores textuais comuns
+    for separator in [
+        "Conclusão final:", "Conclusão final",
+        "Conclusao final:", "Conclusao final",
+        "Conclusão:", "Conclusao:",
+        "Resposta:", "Resposta",
+        "Final Answer:", "Final Answer"
+    ]:
+        pattern = rf"\*?\*?\s*{re.escape(separator)}\s*\*?\*?"
+        parts = re.split(pattern, response_text, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            reasoning = parts[0].strip()
+            answer = parts[1].strip()
+            if answer.startswith(":"):
+                answer = answer[1:].strip()
+            return reasoning, answer
+
+    # Fallback supremo: se não houver divisão alguma, o reasoning é o texto original
+    # e a answer é o texto original (para evitar salvar campos de resposta vazios)
+    return response_text, response_text
 
 
 def init_llm(provider: str = "ollama", model_name: str = "granite4.1:3b"):

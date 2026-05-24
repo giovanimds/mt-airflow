@@ -80,7 +80,19 @@ with DAG(
     default_args={"owner": "dataset-builder"},
     params={
         "llm_provider": Param("ollama", type="string", enum=["ollama", "gemini"], description="Provedor de LLM a ser utilizado"),
-        "llm_model": Param("granite4.1:3b", type="string", description="Nome do modelo da LLM (Ex: granite4.1:3b para Ollama ou gemini-2.5-flash para Gemini)"),
+        "llm_model": Param(
+            "granite4.1:3b",
+            type="string",
+            enum=[
+                "granite4.1:3b",
+                "granite4.1:8b",
+                "gemini-2.5-flash",
+                "gemini-1.5-flash",
+                "gemini-2.5-pro",
+                "gemini-1.5-pro",
+            ],
+            description="Modelo da LLM a ser utilizado (selecione de acordo com o provedor)",
+        ),
     },
     tags=["dataset-builder", "qa", "generation", "sensor"],
 ) as dag:

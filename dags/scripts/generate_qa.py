@@ -7,7 +7,7 @@ import urllib.request
 
 from google.cloud import storage
 from pydantic import BaseModel, Field
-from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 from langchain_mistralai import ChatMistralAI
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -177,8 +177,8 @@ def build_pipeline(llm):
 
 
 
-def init_llm(provider: str = "ollama", model_name: str = "granite4.1:3b"):
-    """Returns (llm, model_name). Supports ollama and gemini, with fallback to Mistral."""
+def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instruct"):
+    """Returns (llm, model_name). Supports vllm and gemini, with fallback to Mistral."""
     if provider.lower() == "gemini":
         try:
             llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.7)
@@ -191,20 +191,32 @@ def init_llm(provider: str = "ollama", model_name: str = "granite4.1:3b"):
             log.info("LLM iniciado com sucesso: Mistral %s", fallback_model_name)
             return llm, fallback_model_name
 
-    # Default: ollama
-    ollama_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    # Default: vllm
+    vllm_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
+    
+    # Mapeia nomes de modelo amigáveis para o nome real servido pelo vLLM
+    actual_model = model_name
+    if model_name in ("granite4.1:8b", "granite4.1:3b"):
+        actual_model = "ibm-granite/granite-4.1-8b-fp8"
+
     try:
-        log.info("Testando conexao com Ollama em: %s", ollama_url)
-        # Envia um GET rapido para testar se o Ollama esta online
-        with urllib.request.urlopen(ollama_url, timeout=2) as response:
+        log.info("Testando conexao com vLLM em: %s", vllm_url)
+        # Envia um GET rapido para testar se o vLLM esta online
+        health_url = f"{vllm_url}/health"
+        with urllib.request.urlopen(health_url, timeout=2) as response:
             if response.status == 200:
-                llm = ChatOllama(model=model_name, temperature=0.7, base_url=ollama_url)
-                log.info("LLM iniciado com sucesso: Ollama %s em %s", model_name, ollama_url)
-                return llm, model_name
+                llm = ChatOpenAI(
+                    model=actual_model,
+                    temperature=0.7,
+                    openai_api_base=f"{vllm_url}/v1",
+                    openai_api_key="token-vllm-or-anything",
+                )
+                log.info("LLM iniciado com sucesso: vLLM %s em %s", actual_model, vllm_url)
+                return llm, actual_model
             else:
                 raise Exception(f"Status HTTP {response.status}")
     except Exception as exc:
-        log.warning("Ollama indisponivel em %s (%s), usando Mistral como fallback.", ollama_url, exc)
+        log.warning("vLLM indisponivel em %s (%s), usando Mistral como fallback.", vllm_url, exc)
         fallback_model_name = "ministral-3b-2512"
         llm = ChatMistralAI(model=fallback_model_name, temperature=0.7)
         log.info("LLM iniciado com sucesso: Mistral %s", fallback_model_name)
@@ -219,8 +231,8 @@ def process_pending_files(
     raw_prefix: str = "raw_corpus/",
     out_prefix: str = "datasets/pt-br_Q&A/",
     limit: int | None = None,
-    provider: str = "ollama",
-    model_name: str = "granite4.1:3b",
+    provider: str = "vllm",
+    model_name: str = "Meta-Llama-3.1-8B-Instruct",
 ) -> dict:
     """
     Descobre quais parquets ainda não foram convertidos em JSONL e processa.

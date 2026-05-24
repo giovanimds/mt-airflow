@@ -24,7 +24,7 @@ env:
   - name: _PIP_ADDITIONAL_REQUIREMENTS
     value: >-
       polars
-      langchain-ollama
+      langchain-openai
       langchain-mistralai
       langchain-google-genai
       langchain-core
@@ -36,8 +36,8 @@ extraEnv: |
     valueFrom:
       fieldRef:
         fieldPath: status.hostIP
-  - name: OLLAMA_BASE_URL
-    value: http://$(HOST_IP):11434
+  - name: VLLM_BASE_URL
+    value: http://$(HOST_IP):8000
 
 volumes:
   - name: gcp-service-account

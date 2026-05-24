@@ -34,15 +34,15 @@ def _backfill(**context):
     from generate_qa import process_pending_files  # noqa: PLC0415
 
     params = context.get("params", {})
-    llm_provider = params.get("llm_provider", "ollama")
-    llm_model_selected = params.get("llm_model", "granite4.1:3b")
+    llm_provider = params.get("llm_provider", "vllm")
+    llm_model_selected = params.get("llm_model", "Meta-Llama-3.1-8B-Instruct")
     custom_llm_model = (params.get("custom_llm_model") or "").strip()
 
     if llm_model_selected == "Customizado (digitar no campo abaixo)":
         if custom_llm_model:
             llm_model = custom_llm_model
         else:
-            llm_model = "gemini-2.5-flash" if llm_provider == "gemini" else "granite4.1:3b"
+            llm_model = "gemini-2.5-flash" if llm_provider == "gemini" else "Meta-Llama-3.1-8B-Instruct"
     else:
         llm_model = llm_model_selected
 
@@ -85,13 +85,15 @@ with DAG(
     max_active_runs=1,   # garante que não rode em paralelo
     default_args={"owner": "dataset-builder"},
     params={
-        "llm_provider": Param("ollama", type="string", enum=["ollama", "gemini"], description="Provedor de LLM a ser utilizado"),
+        "llm_provider": Param("vllm", type="string", enum=["vllm", "gemini"], description="Provedor de LLM a ser utilizado"),
         "llm_model": Param(
-            "granite4.1:3b",
+            "Meta-Llama-3.1-8B-Instruct",
             type="string",
             enum=[
-                "granite4.1:3b",
+                "Meta-Llama-3.1-8B-Instruct",
+                "deepseek-r1:14b",
                 "granite4.1:8b",
+                "granite4.1:3b",
                 "gemini-2.5-flash",
                 "gemini-2.5-pro",
                 "gemini-1.5-flash",

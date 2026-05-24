@@ -148,9 +148,14 @@ def build_pipeline(llm):
         return dataset
 
     def roteador_de_lixo(inputs):
-        fase_1 = inputs["fase_1"]
-        fase_2 = inputs["fase_2"]
-        eh_lixo = fase_2.get("eh_desprovido_de_utilidade_pratica", False)
+        fase_1 = inputs.get("fase_1", {})
+        fase_2 = inputs.get("fase_2", {})
+        if not isinstance(fase_1, dict):
+            fase_1 = {"abstract": str(fase_1) if fase_1 is not None else "", "keywords": []}
+        if not isinstance(fase_2, dict):
+            fase_2 = {}
+
+        eh_lixo = fase_2.get("eh_desprovido_de_utilidade_pratica", False) or not fase_1.get("abstract")
 
         if eh_lixo:
             return {
@@ -160,7 +165,7 @@ def build_pipeline(llm):
                 "status_pipeline": "descartado_para_revisao",
             }
 
-        destilacao_input = {"abstract": fase_1["abstract"], "quantidade": 3}
+        destilacao_input = {"abstract": fase_1.get("abstract", "") if isinstance(fase_1, dict) else "", "quantidade": 3}
         tarefas_paralelas = {
             "fase_1": lambda _: fase_1,
             "fase_2": lambda _: fase_2,
@@ -183,7 +188,7 @@ def build_pipeline(llm):
         abstract_prompt | llm_json | json_parser
         | {
             "fase_1": lambda x: x,
-            "fase_2": {"abstract": lambda x: x["abstract"]} | meta_prompt | llm_json | json_parser,
+            "fase_2": {"abstract": lambda x: x.get("abstract", "") if isinstance(x, dict) else ""} | meta_prompt | llm_json | json_parser,
         }
         | RunnableLambda(roteador_de_lixo)
     )
@@ -357,9 +362,8 @@ def process_pending_files(
                     log.warning("Linha %d — status inesperado: %s", row_idx, status)
 
             except Exception as exc:
+                log.exception("Erro ao processar linha %d do arquivo %s. Texto original (primeiros 300 caracteres): %r", row_idx, base_name, texto[:300])
                 msg = f"{base_name}[{row_idx}]: {exc}"
-                log.error(msg)
-                log.debug(traceback.format_exc())
                 errors.append(msg)
 
         total_discarded += file_discarded

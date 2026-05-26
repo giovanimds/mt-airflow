@@ -2,6 +2,12 @@ executor: CeleryExecutor
 allowPodLaunching: true
 allowJobLaunching: true
 
+images:
+  airflow:
+    repository: registry.morescotech.com.br/morescotech/airflow
+    tag: latest
+    pullPolicy: IfNotPresent
+
 config:
   core:
     hostname_callable: 'airflow.utils.net.get_host_ip_address'
@@ -15,21 +21,9 @@ env:
   - name: GOOGLE_APPLICATION_CREDENTIALS
     value: /opt/airflow/secrets/gcp/service-account.json
   - name: GOOGLE_API_KEY
-    valueFrom:
-      secretKeyRef:
-        name: gemini-secrets
-        key: google-api-key
-  # Pacotes instalados automaticamente em todos os pods (worker, scheduler, etc.)
-  # O Helm chart do Airflow lê esta variável e executa pip install no startup.
-  - name: _PIP_ADDITIONAL_REQUIREMENTS
-    value: >-
-      polars
-      langchain-openai
-      langchain-mistralai
-      langchain-google-genai
-      langchain-core
-      langchain-community
-      google-cloud-storage
+    value: "YOUR_GOOGLE_API_KEY"
+  - name: DEEPSEEK_API_KEY
+    value: "YOUR_DEEPSEEK_API_KEY"
 
 extraEnv: |
   - name: HOST_IP

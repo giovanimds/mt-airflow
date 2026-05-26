@@ -178,49 +178,73 @@ def build_pipeline(llm):
 
 
 def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instruct"):
-    """Returns (llm, model_name). Supports vllm and gemini, with fallback to Mistral."""
-    if provider.lower() == "gemini":
+    """Returns (llm, model_name). Supports vllm, gemini, mistral, and deepseek without fallback."""
+    provider = provider.lower()
+    
+    if provider == "gemini":
         try:
             llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.7)
             log.info("LLM iniciado com sucesso: Gemini %s", model_name)
             return llm, model_name
         except Exception as exc:
-            log.warning("Gemini indisponivel %s (%s), usando Mistral como fallback.", model_name, exc)
-            fallback_model_name = "ministral-3b-2512"
-            llm = ChatMistralAI(model=fallback_model_name, temperature=0.7)
-            log.info("LLM iniciado com sucesso: Mistral %s", fallback_model_name)
-            return llm, fallback_model_name
+            log.error("Falha ao iniciar Gemini %s: %s", model_name, exc)
+            raise
 
-    # Default: vllm
-    vllm_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
-    
-    # Mapeia nomes de modelo amigáveis para o nome real servido pelo vLLM
-    actual_model = model_name
-    if model_name in ("granite4.1:8b", "granite4.1:3b"):
-        actual_model = "ibm-granite/granite-4.1-8b-fp8"
+    elif provider == "mistral":
+        try:
+            llm = ChatMistralAI(model=model_name, temperature=0.7)
+            log.info("LLM iniciado com sucesso: Mistral %s", model_name)
+            return llm, model_name
+        except Exception as exc:
+            log.error("Falha ao iniciar Mistral %s: %s", model_name, exc)
+            raise
 
-    try:
-        log.info("Testando conexao com vLLM em: %s", vllm_url)
-        # Envia um GET rapido para testar se o vLLM esta online
-        health_url = f"{vllm_url}/health"
-        with urllib.request.urlopen(health_url, timeout=2) as response:
-            if response.status == 200:
-                llm = ChatOpenAI(
-                    model=actual_model,
-                    temperature=0.7,
-                    openai_api_base=f"{vllm_url}/v1",
-                    openai_api_key="token-vllm-or-anything",
-                )
-                log.info("LLM iniciado com sucesso: vLLM %s em %s", actual_model, vllm_url)
-                return llm, actual_model
-            else:
-                raise Exception(f"Status HTTP {response.status}")
-    except Exception as exc:
-        log.warning("vLLM indisponivel em %s (%s), usando Mistral como fallback.", vllm_url, exc)
-        fallback_model_name = "ministral-3b-2512"
-        llm = ChatMistralAI(model=fallback_model_name, temperature=0.7)
-        log.info("LLM iniciado com sucesso: Mistral %s", fallback_model_name)
-        return llm, fallback_model_name
+    elif provider == "deepseek":
+        try:
+            # DeepSeek uses an OpenAI-compatible API
+            llm = ChatOpenAI(
+                model=model_name,
+                temperature=0.7,
+                openai_api_base="https://api.deepseek.com",
+                openai_api_key=os.environ.get("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_NOT_SET")
+            )
+            log.info("LLM iniciado com sucesso: DeepSeek %s", model_name)
+            return llm, model_name
+        except Exception as exc:
+            log.error("Falha ao iniciar DeepSeek %s: %s", model_name, exc)
+            raise
+
+    elif provider == "vllm":
+        vllm_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
+        actual_model = model_name
+        # Keep custom mapping if needed, though dynamic models should provide correct names
+        if model_name in ("granite4.1:8b", "granite4.1:3b"):
+            actual_model = "ibm-granite/granite-4.1-8b-fp8"
+        elif model_name == "llama3.2:3b":
+            actual_model = "meta-llama/Llama-3.2-3B-Instruct"
+
+        try:
+            log.info("Testando conexao com vLLM em: %s", vllm_url)
+            # Use urllib to test without external dependency or just init
+            health_url = f"{vllm_url}/health"
+            with urllib.request.urlopen(health_url, timeout=2) as response:
+                if response.status != 200:
+                    raise Exception(f"Status HTTP {response.status}")
+            
+            llm = ChatOpenAI(
+                model=actual_model,
+                temperature=0.7,
+                openai_api_base=f"{vllm_url}/v1",
+                openai_api_key="token-vllm-or-anything",
+            )
+            log.info("LLM iniciado com sucesso: vLLM %s em %s", actual_model, vllm_url)
+            return llm, actual_model
+        except Exception as exc:
+            log.error("Falha ao iniciar vLLM em %s com modelo %s: %s", vllm_url, actual_model, exc)
+            raise
+            
+    else:
+        raise ValueError(f"Provider de LLM desconhecido: {provider}")
 
 
 # ---------------------------------------------------------------------------

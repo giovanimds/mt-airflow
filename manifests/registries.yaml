@@ -1,0 +1,14 @@
+mirrors:
+  "192.168.0.7:5000":
+    endpoint:
+      - "https://192.168.0.7:5000"
+  "registry.morescotech.com.br":
+    endpoint:
+      - "https://registry.morescotech.com.br"
+configs:
+  "192.168.0.7:5000":
+    tls:
+      insecure_skip_verify: true
+  "registry.morescotech.com.br":
+    tls:
+      insecure_skip_verify: false

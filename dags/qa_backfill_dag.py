@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from airflow import DAG
 from airflow.providers.standard.operators.python import PythonOperator
-from airflow.models.param import Param
+from airflow.sdk import Param
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +18,23 @@ OUT_PREFIX = "datasets/pt-br_Q&A/"
 SCRIPTS_PATH = "/opt/airflow/dags/repo/dags/scripts"
 DAGS_PATH = "/opt/airflow/dags/repo/dags"
 
+# Garante que scripts/ esteja no sys.path para o DAG parser
+_local_scripts_path = os.path.join(os.path.dirname(__file__), "scripts")
+if _local_scripts_path not in sys.path:
+    sys.path.insert(0, _local_scripts_path)
+
+try:
+    from model_utils import get_available_models
+    AVAILABLE_MODELS = get_available_models()
+except Exception as e:
+    log.warning("Failed to load models dynamically: %s", e)
+    AVAILABLE_MODELS = [
+        "vllm: Meta-Llama-3.1-8B-Instruct",
+        "gemini: gemini-2.0-flash",
+        "mistral: mistral-large-latest",
+        "deepseek: deepseek-chat",
+        "Customizado (digitar no campo abaixo)"
+    ]
 
 def _backfill(**context):
     """
@@ -34,17 +51,21 @@ def _backfill(**context):
     from generate_qa import process_pending_files  # noqa: PLC0415
 
     params = context.get("params", {})
-    llm_provider = params.get("llm_provider", "vllm")
-    llm_model_selected = params.get("llm_model", "Meta-Llama-3.1-8B-Instruct")
+    llm_model_selected = params.get("llm_model", "vllm: Meta-Llama-3.1-8B-Instruct")
     custom_llm_model = (params.get("custom_llm_model") or "").strip()
 
     if llm_model_selected == "Customizado (digitar no campo abaixo)":
-        if custom_llm_model:
-            llm_model = custom_llm_model
-        else:
-            llm_model = "gemini-2.5-flash" if llm_provider == "gemini" else "Meta-Llama-3.1-8B-Instruct"
+        llm_input = custom_llm_model
     else:
-        llm_model = llm_model_selected
+        llm_input = llm_model_selected
+
+    # Parse provider and model (format: "provider: model_name")
+    if ": " in llm_input:
+        llm_provider, llm_model = llm_input.split(": ", 1)
+    else:
+        # Fallback if format is invalid
+        llm_provider = "vllm"
+        llm_model = llm_input or "Meta-Llama-3.1-8B-Instruct"
 
     log.info("Iniciando backfill em gs://%s/%s com o provedor %s e modelo %s", GCS_BUCKET, RAW_PREFIX, llm_provider, llm_model)
     summary = process_pending_files(
@@ -85,31 +106,16 @@ with DAG(
     max_active_runs=1,   # garante que não rode em paralelo
     default_args={"owner": "dataset-builder"},
     params={
-        "llm_provider": Param("vllm", type="string", enum=["vllm", "gemini"], description="Provedor de LLM a ser utilizado"),
         "llm_model": Param(
-            "Meta-Llama-3.1-8B-Instruct",
+            AVAILABLE_MODELS[0] if AVAILABLE_MODELS else "vllm: Meta-Llama-3.1-8B-Instruct",
             type="string",
-            enum=[
-                "Meta-Llama-3.1-8B-Instruct",
-                "deepseek-r1:14b",
-                "granite4.1:8b",
-                "granite4.1:3b",
-                "gemini-2.5-flash",
-                "gemini-2.5-pro",
-                "gemini-1.5-flash",
-                "gemini-1.5-pro",
-                "gemini-2.0-flash-lite",
-                "gemini-flash-latest",
-                "gemini-flash-lite-latest",
-                "gemini-pro-latest",
-                "Customizado (digitar no campo abaixo)",
-            ],
+            enum=AVAILABLE_MODELS,
             description="Modelo da LLM a ser utilizado (ou escolha 'Customizado' para digitar abaixo)",
         ),
         "custom_llm_model": Param(
             None,
             type=["string", "null"],
-            description="Caso tenha escolhido 'Customizado' no campo acima, digite o modelo (Ex: gemini-3.5-flash, gemini-3.1-flash-lite)",
+            description="Caso tenha escolhido 'Customizado' no campo acima, digite no formato 'provedor: modelo' (Ex: gemini: gemini-1.5-flash)",
         ),
     },
     tags=["dataset-builder", "qa", "backfill"],

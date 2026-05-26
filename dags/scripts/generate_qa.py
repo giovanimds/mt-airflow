@@ -4,6 +4,7 @@ import logging
 import traceback
 import polars as pl
 import urllib.request
+import time
 
 from google.cloud import storage
 from pydantic import BaseModel, Field
@@ -177,14 +178,14 @@ def build_pipeline(llm):
 
 
 
-def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instruct"):
+def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instruct", max_retries: int = 5):
     """Returns (llm, model_name). Supports vllm, gemini, mistral, and deepseek without fallback."""
     provider = provider.lower()
     
     if provider == "gemini":
         try:
-            llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.7)
-            log.info("LLM iniciado com sucesso: Gemini %s", model_name)
+            llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.7, max_retries=max_retries)
+            log.info("LLM iniciado com sucesso: Gemini %s (max_retries=%d)", model_name, max_retries)
             return llm, model_name
         except Exception as exc:
             log.error("Falha ao iniciar Gemini %s: %s", model_name, exc)
@@ -192,8 +193,13 @@ def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instru
 
     elif provider == "mistral":
         try:
-            llm = ChatMistralAI(model=model_name, temperature=0.7)
-            log.info("LLM iniciado com sucesso: Mistral %s", model_name)
+            llm = ChatMistralAI(
+                model=model_name, 
+                temperature=0.7, 
+                max_retries=max_retries,
+                mistral_api_key=os.environ.get("MISTRAL_API_KEY", "MISTRAL_API_KEY_NOT_SET")
+            )
+            log.info("LLM iniciado com sucesso: Mistral %s (max_retries=%d)", model_name, max_retries)
             return llm, model_name
         except Exception as exc:
             log.error("Falha ao iniciar Mistral %s: %s", model_name, exc)
@@ -206,9 +212,10 @@ def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instru
                 model=model_name,
                 temperature=0.7,
                 openai_api_base="https://api.deepseek.com",
-                openai_api_key=os.environ.get("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_NOT_SET")
+                openai_api_key=os.environ.get("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_NOT_SET"),
+                max_retries=max_retries
             )
-            log.info("LLM iniciado com sucesso: DeepSeek %s", model_name)
+            log.info("LLM iniciado com sucesso: DeepSeek %s (max_retries=%d)", model_name, max_retries)
             return llm, model_name
         except Exception as exc:
             log.error("Falha ao iniciar DeepSeek %s: %s", model_name, exc)
@@ -236,8 +243,9 @@ def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instru
                 temperature=0.7,
                 openai_api_base=f"{vllm_url}/v1",
                 openai_api_key="token-vllm-or-anything",
+                max_retries=max_retries
             )
-            log.info("LLM iniciado com sucesso: vLLM %s em %s", actual_model, vllm_url)
+            log.info("LLM iniciado com sucesso: vLLM %s em %s (max_retries=%d)", actual_model, vllm_url, max_retries)
             return llm, actual_model
         except Exception as exc:
             log.error("Falha ao iniciar vLLM em %s com modelo %s: %s", vllm_url, actual_model, exc)
@@ -257,6 +265,9 @@ def process_pending_files(
     limit: int | None = None,
     provider: str = "vllm",
     model_name: str = "Meta-Llama-3.1-8B-Instruct",
+    max_concurrency: int = 4,
+    rpm: int | None = None,
+    rps: float | None = None,
 ) -> dict:
     """
     Descobre quais parquets ainda não foram convertidos em JSONL e processa.
@@ -291,7 +302,7 @@ def process_pending_files(
     skipped = len(raw_blobs) - len(pending)
     log.info("%d arquivo(s) já processado(s) (skip). %d pendente(s).", skipped, len(pending))
 
-    if limit is not None:
+    if limit is not None and limit > 0:
         pending = pending[:limit]
         log.info("Limitando a %d arquivo(s) (limit=%d).", len(pending), limit)
 
@@ -317,6 +328,15 @@ def process_pending_files(
     total_qa = 0
     files_processed = 0
     errors = []
+
+    # Configuração de taxa (RPM / RPS)
+    delay_per_request = 0
+    if rps and rps > 0:
+        delay_per_request = 1.0 / rps
+        log.info("Rate limiting ativo: %.2f RPS (delay: %.2fs por req)", rps, delay_per_request)
+    elif rpm and rpm > 0:
+        delay_per_request = 60.0 / rpm
+        log.info("Rate limiting ativo: %d RPM (delay: %.2fs por req)", rpm, delay_per_request)
 
     for rf in pending:
         base_name = os.path.basename(rf)
@@ -349,7 +369,6 @@ def process_pending_files(
         file_discarded = 0
         file_qa = 0
 
-        BATCH_SIZE = 4
         rows_to_process = []
         for row_idx, row in enumerate(df.iter_rows(named=True)):
             texto = row.get("text", "")
@@ -363,38 +382,53 @@ def process_pending_files(
                 "source": source
             })
 
-        for i in range(0, len(rows_to_process), BATCH_SIZE):
-            batch = rows_to_process[i : i + BATCH_SIZE]
+        n_rows_to_process = len(rows_to_process)
+        total_batches = (n_rows_to_process + max_concurrency - 1) // max_concurrency
+        log.info("🚀 Iniciando processamento de %d linhas (%d lotes de %d) do arquivo %s.", n_rows_to_process, total_batches, max_concurrency, base_name)
+
+        for batch_idx, i in enumerate(range(0, n_rows_to_process, max_concurrency)):
+            batch = rows_to_process[i : i + max_concurrency]
             batch_inputs = [{"texto": item["texto"]} for item in batch]
 
+            start_batch = time.time()
+            log.info("📦 Processando lote %d/%d (%d itens) do arquivo %s...", batch_idx + 1, total_batches, len(batch), base_name)
+            
             try:
-                batch_results = pipeline.batch(batch_inputs, return_exceptions=True)
+                # O LangChain usará max_concurrency internamente se o runnable suportar,
+                # mas como estamos fatiando manualmente aqui, o batch do runnable
+                # processará todos os itens do nosso 'batch' em paralelo (se configurado).
+                batch_results = pipeline.batch(
+                    batch_inputs, 
+                    config={"max_concurrency": max_concurrency},
+                    return_exceptions=True
+                )
             except Exception as exc:
-                log.exception("Erro fatal ao processar lote %d-%d do arquivo %s.", i, i + len(batch) - 1, base_name)
+                log.exception("❌ Erro fatal ao processar lote %d/%d do arquivo %s.", batch_idx + 1, total_batches, base_name)
                 for item in batch:
                     errors.append(f"{base_name}[{item['row_idx']}]: Lote falhou — {exc}")
                 continue
 
+            batch_qa_count = 0
             for item, res in zip(batch, batch_results):
                 row_idx = item["row_idx"]
                 source = item["source"]
                 texto = item["texto"]
 
                 if isinstance(res, Exception):
-                    log.exception("Erro ao processar linha %d do arquivo %s. Texto original (primeiros 300 caracteres): %r", row_idx, base_name, texto[:300], exc_info=res)
+                    log.exception("⚠️ Erro na linha %d do arquivo %s.", row_idx, base_name)
                     msg = f"{base_name}[{row_idx}]: {res}"
                     errors.append(msg)
                     continue
 
                 if not isinstance(res, dict):
-                    log.warning("Linha %d — resultado inválido (não é dict): %s", row_idx, type(res))
+                    log.warning("⚠️ Linha %d — resultado inválido: %s", row_idx, type(res))
                     continue
 
                 status = res.get("status_pipeline", "desconhecido")
 
                 if status == "descartado_para_revisao":
                     file_discarded += 1
-                    log.debug("Linha %d descartada (baixa utilidade).", row_idx)
+                    log.debug("🗑️ Linha %d descartada (baixa utilidade).", row_idx)
                 elif status == "processado_com_sucesso":
                     instrucoes = res.get("dataset_instrucoes") or []
                     for qa in instrucoes:
@@ -407,9 +441,24 @@ def process_pending_files(
                             "source":    source,
                         })
                         file_qa += 1
-                    log.debug("Linha %d → %d Q&As gerados.", row_idx, len(instrucoes or []))
+                        batch_qa_count += 1
+                    log.debug("✨ Linha %d → %d Q&As gerados.", row_idx, len(instrucoes or []))
                 else:
-                    log.warning("Linha %d — status inesperado: %s", row_idx, status)
+                    log.warning("❓ Linha %d — status inesperado: %s", row_idx, status)
+
+            elapsed_batch = time.time() - start_batch
+            log.info(
+                "⏱️ Lote %d/%d concluído em %.2fs. (%d Q&As gerados neste lote. Total do arquivo: %d)", 
+                batch_idx + 1, total_batches, elapsed_batch, batch_qa_count, file_qa
+            )
+
+            # Respeita RPM / RPS
+            if delay_per_request > 0:
+                total_delay = delay_per_request * len(batch)
+                if elapsed_batch < total_delay:
+                    wait_time = total_delay - elapsed_batch
+                    log.debug("⏳ Dormindo %.2fs para respeitar rate limit...", wait_time)
+                    time.sleep(wait_time)
 
         total_discarded += file_discarded
         total_qa += file_qa

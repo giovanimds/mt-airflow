@@ -20,6 +20,14 @@ config:
 env:
   - name: GOOGLE_APPLICATION_CREDENTIALS
     value: /opt/airflow/secrets/gcp/service-account.json
+
+extraEnv: |
+  - name: HOST_IP
+    valueFrom:
+      fieldRef:
+        fieldPath: status.hostIP
+  - name: VLLM_BASE_URL
+    value: http://$(HOST_IP):8000
   - name: GOOGLE_API_KEY
     valueFrom:
       secretKeyRef:
@@ -30,14 +38,11 @@ env:
       secretKeyRef:
         name: gemini-secrets
         key: deepseek-api-key
-
-extraEnv: |
-  - name: HOST_IP
+  - name: MISTRAL_API_KEY
     valueFrom:
-      fieldRef:
-        fieldPath: status.hostIP
-  - name: VLLM_BASE_URL
-    value: http://$(HOST_IP):8000
+      secretKeyRef:
+        name: gemini-secrets
+        key: mistral-api-key
 
 volumes:
   - name: gcp-service-account

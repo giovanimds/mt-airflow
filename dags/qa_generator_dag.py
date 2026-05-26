@@ -53,6 +53,10 @@ def _process_qa(**context):
     params = context.get("params", {})
     llm_model_selected = params.get("llm_model", "vllm: Meta-Llama-3.1-8B-Instruct")
     custom_llm_model = (params.get("custom_llm_model") or "").strip()
+    limit = params.get("limit")
+    max_concurrency = params.get("max_concurrency", 4)
+    rpm = params.get("rpm")
+    rps = params.get("rps")
 
     if llm_model_selected == "Customizado (digitar no campo abaixo)":
         llm_input = custom_llm_model
@@ -68,8 +72,8 @@ def _process_qa(**context):
         llm_model = llm_input or "Meta-Llama-3.1-8B-Instruct"
 
     log.info(
-        "qa_generator_dag iniciado — verificando novos chunks em gs://%s/%s com o provedor %s e modelo %s",
-        GCS_BUCKET, RAW_PREFIX, llm_provider, llm_model,
+        "qa_generator_dag iniciado — verificando novos chunks em gs://%s/%s com o provedor %s e modelo %s (concurrency=%s, rpm=%s, rps=%s)",
+        GCS_BUCKET, RAW_PREFIX, llm_provider, llm_model, max_concurrency, rpm, rps
     )
 
     summary = process_pending_files(
@@ -78,6 +82,10 @@ def _process_qa(**context):
         out_prefix=OUT_PREFIX,
         provider=llm_provider,
         model_name=llm_model,
+        limit=limit,
+        max_concurrency=max_concurrency,
+        rpm=rpm,
+        rps=rps,
     )
 
     ti = context["ti"]
@@ -109,6 +117,9 @@ with DAG(
     max_active_runs=1,
     params={
         "limit": Param(2, type=["integer", "null"], description="Limite de arquivos a processar nesta rodada. Deixe nulo ou 0 para sem limite."),
+        "max_concurrency": Param(4, type="integer", minimum=1, description="Máximo de requisições paralelas (concorrência)"),
+        "rpm": Param(None, type=["integer", "null"], description="Limite de Requisições por Minuto (RPM). Deixe vazio para sem limite."),
+        "rps": Param(None, type=["number", "null"], description="Limite de Requisições por Segundo (RPS). Deixe vazio para sem limite."),
         "llm_model": Param(
             AVAILABLE_MODELS[0] if AVAILABLE_MODELS else "vllm: Meta-Llama-3.1-8B-Instruct",
             type="string",

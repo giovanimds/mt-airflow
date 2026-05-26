@@ -21,9 +21,15 @@ env:
   - name: GOOGLE_APPLICATION_CREDENTIALS
     value: /opt/airflow/secrets/gcp/service-account.json
   - name: GOOGLE_API_KEY
-    value: "YOUR_GOOGLE_API_KEY"
+    valueFrom:
+      secretKeyRef:
+        name: gemini-secrets
+        key: google-api-key
   - name: DEEPSEEK_API_KEY
-    value: "YOUR_DEEPSEEK_API_KEY"
+    valueFrom:
+      secretKeyRef:
+        name: gemini-secrets
+        key: deepseek-api-key
 
 extraEnv: |
   - name: HOST_IP

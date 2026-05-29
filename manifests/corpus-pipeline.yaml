@@ -1,0 +1,397 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: universal-embedder
+  namespace: airflow
+  labels:
+    app: universal-embedder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: universal-embedder
+  template:
+    metadata:
+      labels:
+        app: universal-embedder
+    spec:
+      containers:
+      - name: embedder
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        command: ["python", "universal_embedder.py"]
+        env:
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
+        - name: MISTRAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: airflow-api-keys
+              key: MISTRAL_API_KEY
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wikipedia-pt-scraper
+  namespace: airflow
+  labels:
+    app: wikipedia-pt-scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wikipedia-pt-scraper
+  template:
+    metadata:
+      labels:
+        app: wikipedia-pt-scraper
+    spec:
+      containers:
+      - name: scraper
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/opt/airflow/secrets/gcp/service-account.json"
+        - name: OUTPUT_BUCKET
+          value: "mt-airflow"
+        - name: MAX_DOCUMENTS
+          value: "0"
+        - name: CHUNK_SIZE
+          value: "50"
+        - name: SPIDER_NAME
+          value: "wikipedia_pt"
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        volumeMounts:
+        - name: gcp-service-account
+          mountPath: /opt/airflow/secrets/gcp
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: gcp-service-account
+        secret:
+          secretName: airflow-gcp-key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arxiv-pt-scraper
+  namespace: airflow
+  labels:
+    app: arxiv-pt-scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: arxiv-pt-scraper
+  template:
+    metadata:
+      labels:
+        app: arxiv-pt-scraper
+    spec:
+      containers:
+      - name: scraper
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/opt/airflow/secrets/gcp/service-account.json"
+        - name: OUTPUT_BUCKET
+          value: "mt-airflow"
+        - name: MAX_DOCUMENTS
+          value: "0"
+        - name: CHUNK_SIZE
+          value: "50"
+        - name: SPIDER_NAME
+          value: "arxiv_pt"
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        volumeMounts:
+        - name: gcp-service-account
+          mountPath: /opt/airflow/secrets/gcp
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: gcp-service-account
+        secret:
+          secretName: airflow-gcp-key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gutenberg-pt-scraper
+  namespace: airflow
+  labels:
+    app: gutenberg-pt-scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gutenberg-pt-scraper
+  template:
+    metadata:
+      labels:
+        app: gutenberg-pt-scraper
+    spec:
+      containers:
+      - name: scraper
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/opt/airflow/secrets/gcp/service-account.json"
+        - name: OUTPUT_BUCKET
+          value: "mt-airflow"
+        - name: MAX_DOCUMENTS
+          value: "0"
+        - name: CHUNK_SIZE
+          value: "50"
+        - name: SPIDER_NAME
+          value: "gutenberg_pt"
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        volumeMounts:
+        - name: gcp-service-account
+          mountPath: /opt/airflow/secrets/gcp
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: gcp-service-account
+        secret:
+          secretName: airflow-gcp-key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scielo-pt-scraper
+  namespace: airflow
+  labels:
+    app: scielo-pt-scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scielo-pt-scraper
+  template:
+    metadata:
+      labels:
+        app: scielo-pt-scraper
+    spec:
+      containers:
+      - name: scraper
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/opt/airflow/secrets/gcp/service-account.json"
+        - name: OUTPUT_BUCKET
+          value: "mt-airflow"
+        - name: MAX_DOCUMENTS
+          value: "0"
+        - name: CHUNK_SIZE
+          value: "50"
+        - name: SPIDER_NAME
+          value: "scielo_pt"
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        volumeMounts:
+        - name: gcp-service-account
+          mountPath: /opt/airflow/secrets/gcp
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: gcp-service-account
+        secret:
+          secretName: airflow-gcp-key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bdtd-pt-scraper
+  namespace: airflow
+  labels:
+    app: bdtd-pt-scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bdtd-pt-scraper
+  template:
+    metadata:
+      labels:
+        app: bdtd-pt-scraper
+    spec:
+      containers:
+      - name: scraper
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/opt/airflow/secrets/gcp/service-account.json"
+        - name: OUTPUT_BUCKET
+          value: "mt-airflow"
+        - name: MAX_DOCUMENTS
+          value: "0"
+        - name: CHUNK_SIZE
+          value: "50"
+        - name: SPIDER_NAME
+          value: "bdtd_pt"
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        volumeMounts:
+        - name: gcp-service-account
+          mountPath: /opt/airflow/secrets/gcp
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: gcp-service-account
+        secret:
+          secretName: airflow-gcp-key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bolema-pt-scraper
+  namespace: airflow
+  labels:
+    app: bolema-pt-scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bolema-pt-scraper
+  template:
+    metadata:
+      labels:
+        app: bolema-pt-scraper
+    spec:
+      containers:
+      - name: scraper
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/opt/airflow/secrets/gcp/service-account.json"
+        - name: OUTPUT_BUCKET
+          value: "mt-airflow"
+        - name: MAX_DOCUMENTS
+          value: "0"
+        - name: CHUNK_SIZE
+          value: "50"
+        - name: SPIDER_NAME
+          value: "bolema_pt"
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        volumeMounts:
+        - name: gcp-service-account
+          mountPath: /opt/airflow/secrets/gcp
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: gcp-service-account
+        secret:
+          secretName: airflow-gcp-key
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remat-pt-scraper
+  namespace: airflow
+  labels:
+    app: remat-pt-scraper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: remat-pt-scraper
+  template:
+    metadata:
+      labels:
+        app: remat-pt-scraper
+    spec:
+      containers:
+      - name: scraper
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        env:
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: "/opt/airflow/secrets/gcp/service-account.json"
+        - name: OUTPUT_BUCKET
+          value: "mt-airflow"
+        - name: MAX_DOCUMENTS
+          value: "0"
+        - name: CHUNK_SIZE
+          value: "50"
+        - name: SPIDER_NAME
+          value: "remat_pt"
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        volumeMounts:
+        - name: gcp-service-account
+          mountPath: /opt/airflow/secrets/gcp
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 1Gi
+      volumes:
+      - name: gcp-service-account
+        secret:
+          secretName: airflow-gcp-key

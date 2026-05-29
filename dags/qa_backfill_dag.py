@@ -36,7 +36,7 @@ except Exception as e:
         "Customizado (digitar no campo abaixo)"
     ]
 
-# Versão do Script Principal: 2026-05-29 00:08:00
+# Versão do Script Principal: 2026-05-29 00:10:00
 # (Atualize o comentário acima para forçar o Airflow a recarregar a DAG)
 
 def _backfill(**context):

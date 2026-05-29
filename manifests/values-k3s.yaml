@@ -60,6 +60,8 @@ extraEnv: |
     value: gemini-2.5-flash-lite
   - name: PG_HOST
     value: postgres.morescotech.com.br
+  - name: PG_DATABASE
+    value: airflow
 
 volumes:
   - name: gcp-service-account
@@ -75,10 +77,11 @@ data:
   metadataConnection:
     user: yugabyte
     pass: YugabytePass2026
-    host: postgres.default.svc.cluster.local
+    host: postgres.morescotech.com.br
     port: 5432
     db: airflow
     protocol: postgresql
+    sslmode: require
 
 
 postgresql:

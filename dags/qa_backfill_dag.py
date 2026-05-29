@@ -36,6 +36,9 @@ except Exception as e:
         "Customizado (digitar no campo abaixo)"
     ]
 
+# Versão do Script Principal: 2026-05-29 00:00:00
+# (Atualize o comentário acima para forçar o Airflow a recarregar a DAG)
+
 def _backfill(**context):
     """
     Processa TODOS os chunks parquet ainda sem JSONL correspondente.
@@ -47,6 +50,16 @@ def _backfill(**context):
     for p in (SCRIPTS_PATH, DAGS_PATH):
         if p not in sys.path:
             sys.path.insert(0, p)
+
+    # Log logic to show script version
+    try:
+        script_path = os.path.join(SCRIPTS_PATH, "generate_qa.py")
+        if os.path.exists(script_path):
+            mtime = os.path.getmtime(script_path)
+            dt_mtime = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
+            log.info("🚀 [SCRIPT VERSION] generate_qa.py atualizado em: %s", dt_mtime)
+    except Exception:
+        pass
 
     from generate_qa import process_pending_files  # noqa: PLC0415
 
@@ -107,7 +120,8 @@ with DAG(
     dag_id="qa_backfill_dag",
     description=(
         "Backfill manual: percorre todo o raw_corpus/ do bucket e gera Q&A "
-        "para todos os chunks que ainda não foram processados."
+        "para todos os chunks que ainda não foram processados. "
+        "Dica: utilize 'mistral: mistral-pool' para maximizar a taxa de requisições."
     ),
     start_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
     schedule=None,       # apenas acionamento manual

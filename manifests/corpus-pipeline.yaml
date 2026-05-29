@@ -49,6 +49,127 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: corpus-cleaner
+  namespace: airflow
+  labels:
+    app: corpus-cleaner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: corpus-cleaner
+  template:
+    metadata:
+      labels:
+        app: corpus-cleaner
+    spec:
+      containers:
+      - name: cleaner
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        command: ["python", "corpus_cleaner.py"]
+        env:
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
+        - name: GEMINI_API_KEY_FREE
+          valueFrom:
+            secretKeyRef:
+              name: airflow-api-keys
+              key: GEMINI_API_KEY_FREE
+        - name: GEMINI_API_KEY_PAID
+          valueFrom:
+            secretKeyRef:
+              name: airflow-api-keys
+              key: GEMINI_API_KEY_PAID
+        - name: GEMINI_PAID_MODEL
+          value: "gemini-2.5-flash-lite"
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qa-generator
+  namespace: airflow
+  labels:
+    app: qa-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qa-generator
+  template:
+    metadata:
+      labels:
+        app: qa-generator
+    spec:
+      containers:
+      - name: generator
+        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        imagePullPolicy: Always
+        command: ["python", "generate_qa.py"]
+        env:
+        - name: REDIS_URL
+          value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
+        - name: LLM_PROVIDER
+          value: "vllm"
+        - name: LLM_MODEL_NAME
+          value: "Meta-Llama-3.1-8B-Instruct"
+        - name: VLLM_BASE_URL
+          value: "http://192.168.0.7:8000"
+        - name: GEMINI_API_KEY_FREE
+          valueFrom:
+            secretKeyRef:
+              name: airflow-api-keys
+              key: GEMINI_API_KEY_FREE
+        - name: GEMINI_API_KEY_PAID
+          valueFrom:
+            secretKeyRef:
+              name: airflow-api-keys
+              key: GEMINI_API_KEY_PAID
+        - name: GEMINI_PAID_MODEL
+          value: "gemini-2.5-flash-lite"
+        - name: MISTRAL_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: airflow-api-keys
+              key: MISTRAL_API_KEY
+        resources:
+          requests:
+            cpu: 200m
+            memory: 512Mi
+          limits:
+            cpu: 1000m
+            memory: 2Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
   name: wikipedia-pt-scraper
   namespace: airflow
   labels:
@@ -68,10 +189,6 @@ spec:
         image: registry.morescotech.com.br/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/opt/airflow/secrets/gcp/service-account.json"
-        - name: OUTPUT_BUCKET
-          value: "mt-airflow"
         - name: MAX_DOCUMENTS
           value: "0"
         - name: CHUNK_SIZE
@@ -80,10 +197,16 @@ spec:
           value: "wikipedia_pt"
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
-        volumeMounts:
-        - name: gcp-service-account
-          mountPath: /opt/airflow/secrets/gcp
-          readOnly: true
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
         resources:
           requests:
             cpu: 100m
@@ -91,10 +214,6 @@ spec:
           limits:
             cpu: 500m
             memory: 1Gi
-      volumes:
-      - name: gcp-service-account
-        secret:
-          secretName: airflow-gcp-key
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -118,10 +237,6 @@ spec:
         image: registry.morescotech.com.br/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/opt/airflow/secrets/gcp/service-account.json"
-        - name: OUTPUT_BUCKET
-          value: "mt-airflow"
         - name: MAX_DOCUMENTS
           value: "0"
         - name: CHUNK_SIZE
@@ -130,10 +245,16 @@ spec:
           value: "arxiv_pt"
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
-        volumeMounts:
-        - name: gcp-service-account
-          mountPath: /opt/airflow/secrets/gcp
-          readOnly: true
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
         resources:
           requests:
             cpu: 100m
@@ -141,10 +262,6 @@ spec:
           limits:
             cpu: 500m
             memory: 1Gi
-      volumes:
-      - name: gcp-service-account
-        secret:
-          secretName: airflow-gcp-key
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -168,10 +285,6 @@ spec:
         image: registry.morescotech.com.br/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/opt/airflow/secrets/gcp/service-account.json"
-        - name: OUTPUT_BUCKET
-          value: "mt-airflow"
         - name: MAX_DOCUMENTS
           value: "0"
         - name: CHUNK_SIZE
@@ -180,10 +293,16 @@ spec:
           value: "gutenberg_pt"
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
-        volumeMounts:
-        - name: gcp-service-account
-          mountPath: /opt/airflow/secrets/gcp
-          readOnly: true
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
         resources:
           requests:
             cpu: 100m
@@ -191,10 +310,6 @@ spec:
           limits:
             cpu: 500m
             memory: 1Gi
-      volumes:
-      - name: gcp-service-account
-        secret:
-          secretName: airflow-gcp-key
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -218,10 +333,6 @@ spec:
         image: registry.morescotech.com.br/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/opt/airflow/secrets/gcp/service-account.json"
-        - name: OUTPUT_BUCKET
-          value: "mt-airflow"
         - name: MAX_DOCUMENTS
           value: "0"
         - name: CHUNK_SIZE
@@ -230,10 +341,16 @@ spec:
           value: "scielo_pt"
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
-        volumeMounts:
-        - name: gcp-service-account
-          mountPath: /opt/airflow/secrets/gcp
-          readOnly: true
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
         resources:
           requests:
             cpu: 100m
@@ -241,10 +358,6 @@ spec:
           limits:
             cpu: 500m
             memory: 1Gi
-      volumes:
-      - name: gcp-service-account
-        secret:
-          secretName: airflow-gcp-key
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -268,10 +381,6 @@ spec:
         image: registry.morescotech.com.br/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/opt/airflow/secrets/gcp/service-account.json"
-        - name: OUTPUT_BUCKET
-          value: "mt-airflow"
         - name: MAX_DOCUMENTS
           value: "0"
         - name: CHUNK_SIZE
@@ -280,10 +389,16 @@ spec:
           value: "bdtd_pt"
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
-        volumeMounts:
-        - name: gcp-service-account
-          mountPath: /opt/airflow/secrets/gcp
-          readOnly: true
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
         resources:
           requests:
             cpu: 100m
@@ -291,10 +406,6 @@ spec:
           limits:
             cpu: 500m
             memory: 1Gi
-      volumes:
-      - name: gcp-service-account
-        secret:
-          secretName: airflow-gcp-key
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -318,10 +429,6 @@ spec:
         image: registry.morescotech.com.br/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/opt/airflow/secrets/gcp/service-account.json"
-        - name: OUTPUT_BUCKET
-          value: "mt-airflow"
         - name: MAX_DOCUMENTS
           value: "0"
         - name: CHUNK_SIZE
@@ -330,10 +437,16 @@ spec:
           value: "bolema_pt"
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
-        volumeMounts:
-        - name: gcp-service-account
-          mountPath: /opt/airflow/secrets/gcp
-          readOnly: true
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
         resources:
           requests:
             cpu: 100m
@@ -341,10 +454,6 @@ spec:
           limits:
             cpu: 500m
             memory: 1Gi
-      volumes:
-      - name: gcp-service-account
-        secret:
-          secretName: airflow-gcp-key
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -368,10 +477,6 @@ spec:
         image: registry.morescotech.com.br/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
-        - name: GOOGLE_APPLICATION_CREDENTIALS
-          value: "/opt/airflow/secrets/gcp/service-account.json"
-        - name: OUTPUT_BUCKET
-          value: "mt-airflow"
         - name: MAX_DOCUMENTS
           value: "0"
         - name: CHUNK_SIZE
@@ -380,10 +485,16 @@ spec:
           value: "remat_pt"
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
-        volumeMounts:
-        - name: gcp-service-account
-          mountPath: /opt/airflow/secrets/gcp
-          readOnly: true
+        - name: PG_HOST
+          value: "postgres.morescotech.com.br"
+        - name: PG_PORT
+          value: "5432"
+        - name: PG_USER
+          value: "yugabyte"
+        - name: PG_PASSWORD
+          value: "YugabytePass2026"
+        - name: PG_DATABASE
+          value: "ai_labs"
         resources:
           requests:
             cpu: 100m
@@ -391,7 +502,3 @@ spec:
           limits:
             cpu: 500m
             memory: 1Gi
-      volumes:
-      - name: gcp-service-account
-        secret:
-          secretName: airflow-gcp-key

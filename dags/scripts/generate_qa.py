@@ -1122,15 +1122,134 @@ def process_pending_files(
 # ---------------------------------------------------------------------------
 # CLI entrypoint (para uso sem Airflow)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# CLI entrypoint (Daemon do Valkey para geração de Q&A)
+# ---------------------------------------------------------------------------
 def main():
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    bucket_name = os.environ.get("OUTPUT_BUCKET", "mt-airflow")
-    summary = process_pending_files(bucket_name=bucket_name)
-    log.info("Concluído. Resumo: %s", summary)
+    
+    redis_url = os.environ.get("REDIS_URL", "redis://valkey-primary.default.svc.cluster.local:6379")
+    provider = os.environ.get("LLM_PROVIDER", "vllm")
+    model_name = os.environ.get("LLM_MODEL_NAME", "Meta-Llama-3.1-8B-Instruct")
+    
+    log.info("Iniciando Daemon do QA Generator...")
+    log.info("Provedor LLM: %s, Modelo: %s", provider, model_name)
+    log.info("Conectando ao Valkey em: %s", redis_url)
+    
+    r = redis.Redis.from_url(redis_url)
+    r.ping()
+    log.info("Conexão com Valkey estabelecida com sucesso.")
+    
+    # Inicializar LLM e Pipeline
+    llm, actual_model = init_llm(provider=provider, model_name=model_name)
+    pipeline = build_pipeline(llm)
+    log.info("Pipeline de Q&A montado com sucesso.")
+    
+    log.info("Aguardando tarefas na fila 'qa_queue'...")
+    
+    while True:
+        try:
+            # 1. Obter tarefa da fila
+            result = r.brpop("qa_queue", timeout=5)
+            if not result:
+                continue
+                
+            _, payload_json = result
+            payload = json.loads(payload_json)
+            corpus_id = payload.get("id")
+            raw_id = payload.get("raw_id")
+            
+            if not corpus_id:
+                log.warning("Payload de QA inválido: %s", payload_json)
+                continue
+                
+            log.info("Processando QA para o Corpus ID: %s (Raw ID: %s)", corpus_id, raw_id)
+            
+            # 2. Ler texto limpo do YugabyteDB
+            db_conn = get_db_connection()
+            row = None
+            try:
+                with db_conn.cursor() as cur:
+                    cur.execute("SELECT text, url, title FROM corpus WHERE id = %s;", (corpus_id,))
+                    row = cur.fetchone()
+            finally:
+                db_conn.close()
+                
+            if not row:
+                log.warning("Corpus ID %s não encontrado na tabela 'corpus'. Pulando.", corpus_id)
+                continue
+                
+            text, url, title = row
+            source = url if url else (title if title else "unknown")
+            
+            # 3. Invocar pipeline de geração de Q&A
+            t0 = time.time()
+            res = pipeline.invoke({"texto": text})
+            elapsed = time.time() - t0
+            
+            status = res.get("status_pipeline", "desconhecido")
+            log.info("Processamento da LLM concluído em %.2fs. Status: %s", elapsed, status)
+            
+            # 4. Gravar resultados no YugabyteDB
+            db_conn = get_db_connection()
+            try:
+                with db_conn.cursor() as cur:
+                    if status == "processado_com_sucesso":
+                        instrucoes = res.get("dataset_instrucoes") or []
+                        rows_to_insert = []
+                        
+                        meta = {
+                            "corpus_id": corpus_id,
+                            "raw_id": raw_id
+                        }
+                        
+                        for qa in list(instrucoes):
+                            question = clean_string(qa.get("instruction"))
+                            resp_obj = qa.get("response") or {}
+                            reasoning = clean_string(resp_obj.get("reasoning", ""))
+                            answer = clean_string(resp_obj.get("answer", ""))
+                            
+                            if question and answer:
+                                rows_to_insert.append((
+                                    question, reasoning, answer, actual_model, source, None, json.dumps(meta)
+                                ))
+                                
+                        if rows_to_insert:
+                            from psycopg2.extras import execute_values
+                            execute_values(
+                                cur,
+                                """
+                                INSERT INTO qa_dataset (question, reasoning, answer, model, source, embedding, metadata)
+                                VALUES %s
+                                """,
+                                rows_to_insert
+                            )
+                            log.info("✅ Inseridos %d Q&As na tabela qa_dataset.", len(rows_to_insert))
+                            
+                    # Marcar como processado na tabela raw_corpus
+                    if raw_id:
+                        cur.execute("UPDATE raw_corpus SET processed_qa = TRUE WHERE id = %s;", (raw_id,))
+                        
+                db_conn.commit()
+            except Exception as dbe:
+                log.error("Erro ao gravar Q&As no banco para o Corpus ID %s: %s", corpus_id, dbe)
+                db_conn.rollback()
+            finally:
+                db_conn.close()
+                
+        except redis.exceptions.ConnectionError:
+            log.warning("Conexão com Valkey perdida no QA Daemon. Tentando reconectar...")
+            time.sleep(2)
+        except Exception as e:
+            log.error("Erro no loop principal do QA Daemon: %s", e)
+            traceback.print_exc()
+            time.sleep(5)
 
 
 if __name__ == "__main__":
+    import redis  # Garantir import local
     main()
+

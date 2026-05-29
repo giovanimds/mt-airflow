@@ -18,8 +18,8 @@ def get_db_connection():
     # Cluster defaults (based on established credentials)
     try:
         return psycopg2.connect(
-            host="yb-tservers.default.svc.cluster.local",
-            port=5433,
+            host="postgres.default.svc.cluster.local",
+            port=5432,
             user="yugabyte",
             password="YugabytePass2026",
             database="airflow",

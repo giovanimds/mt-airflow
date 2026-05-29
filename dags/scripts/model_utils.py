@@ -55,8 +55,6 @@ def get_available_models() -> list[str]:
             "deepseek: deepseek-chat"
         ]
 
-        ]
-
     # 3. Sort models but keep preferred ones at the top
     preferred = ["mistral: mistral-pool", "vllm: Meta-Llama-3.1-8B-Instruct"]
     final_list = [m for m in preferred if m in models]

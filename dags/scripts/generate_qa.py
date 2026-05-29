@@ -873,7 +873,10 @@ def process_pending_files(
         file_qa = 0
 
         rows_to_process = []
-        MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", 250_000)) # ~62k tokens (DeepSeek safe limit)
+        # Limite de segurança para processamento em bloco único (~62k tokens)
+        SINGLE_BLOCK_MAX_CHARS = int(os.environ.get("MAX_TEXT_CHARS", 250_000)) 
+        # Tamanho do chunk para artigos gigantes (garante que cada chunk tenha contexto suficiente)
+        CHUNK_SIZE = 150_000 
 
         for row_idx, row in enumerate(df.iter_rows(named=True)):
             texto = row.get("text", "")
@@ -882,15 +885,22 @@ def process_pending_files(
                 log.debug("Linha %d vazia, pulando.", row_idx)
                 continue
             
-            if len(texto) > MAX_TEXT_CHARS:
-                log.warning("📄 Linha %d: Texto muito longo (%d chars). Truncando para %d.", row_idx, len(texto), MAX_TEXT_CHARS)
-                texto = texto[:MAX_TEXT_CHARS] + "\n\n[... TEXTO TRUNCADO POR TAMANHO ...]"
-
-            rows_to_process.append({
-                "row_idx": row_idx,
-                "texto": texto,
-                "source": source
-            })
+            if len(texto) > SINGLE_BLOCK_MAX_CHARS:
+                log.info("📄 Linha %d: Artigo gigante (%d chars). Dividindo em chunks de %d.", row_idx, len(texto), CHUNK_SIZE)
+                # Divide o texto em blocos para gerar múltiplos Q&As do mesmo artigo
+                for chunk_idx, i in enumerate(range(0, len(texto), CHUNK_SIZE)):
+                    chunk_text = texto[i : i + CHUNK_SIZE]
+                    rows_to_process.append({
+                        "row_idx": f"{row_idx}_chunk{chunk_idx}",
+                        "texto": chunk_text,
+                        "source": f"{source} [Parte {chunk_idx + 1}]"
+                    })
+            else:
+                rows_to_process.append({
+                    "row_idx": row_idx,
+                    "texto": texto,
+                    "source": source
+                })
 
         n_rows_to_process = len(rows_to_process)
         total_batches = (n_rows_to_process + max_concurrency - 1) // max_concurrency
@@ -957,9 +967,9 @@ def process_pending_files(
                     elif any(kw in err_details.lower() for kw in ["too large", "context_length", "context length", "maximum context length", "400"]):
                         # Erros de 400 da Mistral/OpenAI costumam ser tamanho de contexto
                         err_type = "CONTEXT_EXCEEDED"
-                        log.error("❌ Linha %d: Contexto excedido (ou erro 400). Erro: %s", row_idx, err_details)
+                        log.error("❌ Linha %s: Chunk ainda excede o limite de contexto. Erro: %s", row_idx, err_details)
                     else:
-                        log.error("❌ Linha %d: Falha na API/Rede após retry. Erro: %s", row_idx, err_details)
+                        log.error("❌ Linha %s: Falha na API/Rede após retry. Erro: %s", row_idx, err_details)
                     
                     msg = f"{base_name}[{row_idx}] [{err_type}]: {err_details}"
                     errors.append(msg)

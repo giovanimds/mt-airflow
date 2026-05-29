@@ -30,7 +30,7 @@ def get_db_connection(dbname):
     }
     try:
         return psycopg2.connect(**params, load_balance=True)
-    except TypeError:
+    except (TypeError, psycopg2.Error):
         return psycopg2.connect(**params)
 
 

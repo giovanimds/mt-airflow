@@ -260,7 +260,7 @@ def get_db_connection():
     }
     try:
         return psycopg2.connect(**params, load_balance=True)
-    except TypeError:
+    except (TypeError, psycopg2.Error):
         return psycopg2.connect(**params)
 
 def clean_string(s):

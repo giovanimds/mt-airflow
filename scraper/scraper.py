@@ -76,7 +76,7 @@ class YugabyteDBCorpusPipeline:
         }
         try:
             self.db_conn = psycopg2.connect(**params, load_balance=True)
-        except TypeError:
+        except (TypeError, psycopg2.Error):
             self.db_conn = psycopg2.connect(**params)
         self.redis_client = redis.Redis.from_url(self.redis_url)
 

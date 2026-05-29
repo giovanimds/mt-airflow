@@ -1,0 +1,10 @@
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: postgres-alpn
+  namespace: default
+spec:
+  alpnProtocols:
+    - "postgresql"
+    - "http/1.1"
+    - "h2"

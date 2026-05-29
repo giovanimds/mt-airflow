@@ -5,6 +5,7 @@ import traceback
 import polars as pl
 import urllib.request
 import time
+import threading
 
 from google.cloud import storage
 from pydantic import BaseModel, Field
@@ -15,6 +16,339 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnableParallel
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Gemini Pool LLM — descoberta dinâmica + round-robin com cooldown por modelo
+# ---------------------------------------------------------------------------
+_GEMINI_POOL_LOCK = threading.Lock()
+
+# Modelos a excluir do pool (TTS, imagem, especialistas, robotics, etc.)
+_GEMINI_EXCLUDE_PATTERNS = [
+    "tts", "image", "robotics", "computer-use", "clip", "lyria",
+    "nano-banana", "antigravity", "deep-research",
+]
+
+def _discover_gemini_models(api_key: str) -> list[str]:
+    """
+    Chama /v1beta/models e retorna IDs dos modelos que suportam generateContent,
+    excluindo modelos de TTS, imagem e especialistas.
+    """
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=200"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            data = json.loads(resp.read().decode())
+        models = data.get("models", [])
+        result = []
+        for m in models:
+            name = m.get("name", "").replace("models/", "")
+            if "generateContent" not in m.get("supportedGenerationMethods", []):
+                continue
+            # Filtra modelos inúteis para o pipeline de texto
+            if any(pat in name.lower() for pat in _GEMINI_EXCLUDE_PATTERNS):
+                continue
+            result.append(name)
+        log.info("[GeminiPool] %d modelos descobertos via API: %s", len(result), result)
+        return result
+    except Exception as e:
+        log.warning("[GeminiPool] Falha ao descobrir modelos: %s", e)
+        return []
+
+def _probe_gemini_model(api_key: str, model_id: str) -> bool:
+    """
+    Faz uma chamada mínima real para confirmar que o modelo tem cota disponível.
+    Retorna True se respondeu com sucesso.
+    """
+    try:
+        llm = ChatGoogleGenerativeAI(
+            model=model_id,
+            temperature=0.0,
+            max_retries=0,
+            max_output_tokens=16,
+            google_api_key=api_key,
+        )
+        llm.invoke("Hi")
+        log.info("[GeminiPool] ✅ %s: cota OK", model_id)
+        return True
+    except Exception as e:
+        err = str(e).lower()
+        if "429" in err or "quota" in err or "resource_exhausted" in err:
+            log.warning("[GeminiPool] ⚠️  %s: sem cota (rate-limit)", model_id)
+        else:
+            log.warning("[GeminiPool] ❌ %s: erro (%s)", model_id, str(e)[:80])
+        return False
+
+
+class GeminiPoolLLM:
+    """
+    Pool dinâmico de modelos Gemini com:
+    - Descoberta automática via /v1beta/models na startup
+    - Probe de cota real para cada modelo
+    - Round-robin thread-safe entre modelos ativos
+    - Cooldown por modelo (60s) ao bater rate-limit — não descarta, apenas pausa
+    - Fallback para PAID key como última opção
+    - `with_structured_output` propaga o pool para wrappers estruturados
+    """
+    COOLDOWN_SECONDS = 60.0
+
+    def __init__(self, entries: list[dict], is_structured: bool = False):
+        """
+        entries: lista de dicts com keys 'llm', 'model_id', 'key_name', 'cooldown_until'
+        """
+        self._entries = entries  # [{"llm": ..., "model_id": ..., "key_name": ..., "cooldown_until": 0.0}]
+        self._counter = 0
+        self._is_structured = is_structured
+
+    @classmethod
+    def build(
+        cls,
+        free_key: str | None,
+        paid_key: str | None,
+        paid_model: str = "gemini-2.5-flash-lite",
+        max_retries: int = 3,
+        max_output_tokens: int = 32768,
+        probe: bool = True,
+    ) -> "GeminiPoolLLM":
+        """
+        Descobre e sonda todos os modelos disponíveis.
+        FREE key  → todos os modelos da API que passam no probe
+        PAID key  → modelo pago fixo (fallback de última instância)
+        """
+        entries = []
+
+        # ---- FREE: descoberta dinâmica ----
+        if free_key:
+            model_ids = _discover_gemini_models(free_key)
+            log.info("[GeminiPool] Sondando %d modelos FREE...", len(model_ids))
+            for mid in model_ids:
+                ok = _probe_gemini_model(free_key, mid) if probe else True
+                if ok:
+                    llm = ChatGoogleGenerativeAI(
+                        model=mid,
+                        temperature=0.5,
+                        max_retries=0,
+                        max_output_tokens=max_output_tokens,
+                        google_api_key=free_key,
+                    )
+                    entries.append({
+                        "llm": llm,
+                        "model_id": mid,
+                        "key_name": "FREE",
+                        "cooldown_until": 0.0,
+                    })
+
+        # ---- PAID: modelo fixo, adicionado ao final como fallback ----
+        if paid_key:
+            paid_llm = ChatGoogleGenerativeAI(
+                model=paid_model,
+                temperature=0.5,
+                max_retries=max_retries,
+                max_output_tokens=max_output_tokens,
+                google_api_key=paid_key,
+            )
+            entries.append({
+                "llm": paid_llm,
+                "model_id": paid_model,
+                "key_name": "PAID",
+                "cooldown_until": 0.0,
+            })
+            log.info("[GeminiPool] PAID adicionado ao pool: %s", paid_model)
+
+        if not entries:
+            raise ValueError("[GeminiPool] Nenhum modelo Gemini disponível após probe.")
+
+        log.info(
+            "[GeminiPool] Pool final: %d modelos — %s",
+            len(entries),
+            [e["model_id"] for e in entries],
+        )
+        return cls(entries)
+
+    def _is_rate_limit_error(self, exc: Exception) -> bool:
+        s = str(exc).lower()
+        return "429" in s or "quota" in s or "resource_exhausted" in s
+
+    def _get_next_available(self) -> dict | None:
+        """Round-robin ignorando modelos em cooldown."""
+        with _GEMINI_POOL_LOCK:
+            now = time.time()
+            n = len(self._entries)
+            for _ in range(n):
+                idx = self._counter % n
+                self._counter += 1
+                entry = self._entries[idx]
+                if now > entry["cooldown_until"]:
+                    return entry
+            return None  # todos em cooldown
+
+    def _mark_cooldown(self, entry: dict):
+        with _GEMINI_POOL_LOCK:
+            entry["cooldown_until"] = time.time() + self.COOLDOWN_SECONDS
+        log.warning(
+            "[GeminiPool] 🔴 %s (%s) em cooldown %ds.",
+            entry["model_id"], entry["key_name"], int(self.COOLDOWN_SECONDS),
+        )
+
+    def _invoke_with_pool(self, method_name: str, *args, **kwargs):
+        """
+        Tenta cada modelo disponível no pool em round-robin.
+        Ao bater rate-limit, coloca modelo em cooldown e tenta o próximo.
+        """
+        n = len(self._entries)
+        tried = set()
+
+        for _ in range(n + 1):  # +1 para dar segunda chance após cooldowns
+            entry = self._get_next_available()
+            if entry is None:
+                # Todos em cooldown — aguarda o menor cooldown e retenta
+                with _GEMINI_POOL_LOCK:
+                    now = time.time()
+                    wait = min(e["cooldown_until"] - now for e in self._entries)
+                wait = max(1.0, wait)
+                log.warning("[GeminiPool] Todos os modelos em cooldown. Aguardando %.0fs...", wait)
+                time.sleep(wait)
+                entry = self._get_next_available()
+                if entry is None:
+                    raise RuntimeError("[GeminiPool] Nenhum modelo disponível após espera.")
+
+            model_id = entry["model_id"]
+            if model_id in tried:
+                continue
+            tried.add(model_id)
+
+            log.info("[GeminiPool] 🟢 Usando %s (%s)", model_id, entry["key_name"])
+            try:
+                method = getattr(entry["llm"], method_name)
+                return method(*args, **kwargs)
+            except Exception as exc:
+                if self._is_rate_limit_error(exc):
+                    self._mark_cooldown(entry)
+                    log.info("[GeminiPool] Tentando próximo modelo do pool...")
+                    continue
+                raise  # Erro não-recuperável
+
+        raise RuntimeError(f"[GeminiPool] Todos os {n} modelos falharam ou estão em cooldown.")
+
+    def invoke(self, input, config=None, **kwargs):
+        return self._invoke_with_pool("invoke", input, config=config, **kwargs)
+
+    def batch(self, inputs, config=None, **kwargs):
+        return self._invoke_with_pool("batch", inputs, config=config, **kwargs)
+
+    def with_structured_output(self, schema, **kwargs) -> "GeminiPoolLLM":
+        """Propaga structured_output para todos os LLMs do pool."""
+        new_entries = []
+        for e in self._entries:
+            new_entries.append({
+                **e,
+                "llm": e["llm"].with_structured_output(schema, **kwargs),
+            })
+        return GeminiPoolLLM(new_entries, is_structured=True)
+
+# ---------------------------------------------------------------------------
+# YugabyteDB Connection & Syncing Utilities
+# ---------------------------------------------------------------------------
+def get_db_connection():
+    import psycopg2
+    return psycopg2.connect(
+        host=os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
+        port=int(os.environ.get("PG_PORT", 5432)),
+        user=os.environ.get("PG_USER", "yugabyte"),
+        password=os.environ.get("PG_PASSWORD", "YugabytePass2026"),
+        database=os.environ.get("PG_DATABASE", "ai_labs"),
+        sslmode="disable"
+    )
+
+def clean_string(s):
+    if s is None:
+        return None
+    if isinstance(s, str):
+        return s.replace('\x00', '').replace('\u0000', '')
+    return str(s).replace('\x00', '').replace('\u0000', '')
+
+def save_corpus_to_db(conn, df, file_name):
+    from psycopg2.extras import execute_values
+    log.info("Salvando corpus do arquivo %s no YugabyteDB...", file_name)
+    rows_to_insert = []
+    for row in df.iter_rows(named=True):
+        title = clean_string(row.get("title"))
+        text = clean_string(row.get("text"))
+        url = clean_string(row.get("url"))
+        language = clean_string(row.get("language"))
+        extracted_at = row.get("extracted_at")
+        char_count = row.get("char_count")
+        word_count = row.get("word_count")
+        
+        meta = {"source_file": file_name}
+        
+        rows_to_insert.append((
+            title,
+            text,
+            url,
+            language,
+            extracted_at,
+            char_count,
+            word_count,
+            None, # embedding
+            json.dumps(meta) # metadata
+        ))
+        
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO corpus (title, text, url, language, extracted_at, char_count, word_count, embedding, metadata)
+            VALUES %s
+            """,
+            rows_to_insert
+        )
+        cur.execute(
+            "INSERT INTO imported_files (file_name, file_type) VALUES (%s, %s) ON CONFLICT (file_name) DO NOTHING;",
+            (file_name, "corpus")
+        )
+    conn.commit()
+    log.info("Corpus de %s salvo com sucesso no YugabyteDB!", file_name)
+
+def save_qa_to_db(conn, results_jsonl, file_name):
+    from psycopg2.extras import execute_values
+    if not results_jsonl:
+        return
+    log.info("Salvando %d Q&As do arquivo %s no YugabyteDB...", len(results_jsonl), file_name)
+    rows_to_insert = []
+    for item in results_jsonl:
+        question = clean_string(item.get("question"))
+        reasoning = clean_string(item.get("reasoning"))
+        answer = clean_string(item.get("answer"))
+        model = clean_string(item.get("model"))
+        source = clean_string(item.get("source"))
+        
+        meta = {"source_file": file_name}
+        
+        rows_to_insert.append((
+            question,
+            reasoning,
+            answer,
+            model,
+            source,
+            None, # embedding
+            json.dumps(meta) # metadata
+        ))
+        
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            """
+            INSERT INTO qa_dataset (question, reasoning, answer, model, source, embedding, metadata)
+            VALUES %s
+            """,
+            rows_to_insert
+        )
+        cur.execute(
+            "INSERT INTO imported_files (file_name, file_type) VALUES (%s, %s) ON CONFLICT (file_name) DO NOTHING;",
+            (file_name, "qa")
+        )
+    conn.commit()
+    log.info("Q&As de %s salvos com sucesso no YugabyteDB!", file_name)
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -71,13 +405,42 @@ qa_prompt = ChatPromptTemplate.from_template(
     """
 )
 
-solucionador_prompt = ChatPromptTemplate.from_template(
-    """Você é um pesquisador sênior respondendo a uma dúvida acadêmica.
+# ---------------------------------------------------------------------------
+# Prompts
+# ---------------------------------------------------------------------------
 
-    Escreva sua linha de raciocínio passo a passo (Identificação da intenção -> Raciocínio -> Resposta -> Revisão)
-    e depois forneça a conclusão/resposta final direta e detalhada.
+# ... (abstract_prompt, meta_prompt, qa_prompt unchanged)
+
+reasoning_prompt = ChatPromptTemplate.from_template(
+    """Você é um pesquisador sênior em uma fase de reflexão profunda.
+    Sua tarefa é analisar a pergunta abaixo e desenvolver um raciocínio detalhado, fluido e natural.
+
+    REGRAS DO RACIOCÍNIO (Estrutura Markdown):
+    - Escreva como um monólogo interno, explorando o problema de forma discursiva.
+    - Organize o texto em seções iniciadas por títulos Markdown de nível 2, como: ## Entendendo o problema, ## Explorando alternativas ou ## Aplicando solução.
+    - Termine seu raciocínio OBRIGATORIAMENTE com a seção: ## Formulando resposta seguido de um breve resumo do que será a conclusão.
+    - PROIBIDO o uso de listas numeradas ou bullet points dentro das seções.
+    - Seja prolixo e detalhado na exploração intelectual.
 
     Pergunta: {pergunta}
+    """
+)
+
+answering_prompt = ChatPromptTemplate.from_template(
+    """Você é um pesquisador sênior fornecendo uma resposta técnica definitiva.
+    Com base no raciocínio detalhado abaixo, forneça a resposta final técnica e detalhada para a pergunta original.
+
+    Pergunta: {pergunta}
+
+    Raciocínio prévio (Seções Markdown):
+    {reasoning}
+
+    Sua resposta deve focar exclusivamente na conclusão técnica, sendo direta, completa e revisada.
+
+    REGRA CRÍTICA DE FORMATAÇÃO:
+    - NÃO inclua títulos ou cabeçalhos Markdown de qualquer nível (ex: #, ##, ###, etc.) no topo da resposta.
+    - NÃO inclua prefixos ou rótulos em negrito no início (ex: NÃO comece com '**Resposta:**' ou '**Resposta Técnica Definitiva:**').
+    - Inicie a resposta de forma fluida, direta e natural, partindo direto para a explicação ou solução técnica.
     """
 )
 
@@ -105,9 +468,24 @@ class QuestionItem(BaseModel):
 class QuestionsList(BaseModel):
     perguntas: list[QuestionItem]
 
+class AnswerResult(BaseModel):
+    answer: str = Field(
+        description=(
+            "Sua conclusão ou resposta final direta e detalhada. "
+            "REGRA CRÍTICA: Comece a responder diretamente. NÃO inclua nenhum título, "
+            "rótulo (como 'Resposta:') ou cabeçalhos Markdown (como '#', '##', '###' ou '**Título**') no início da resposta."
+        )
+    )
+
 class QAResult(BaseModel):
-    reasoning: str = Field(description="Sua linha de raciocínio passo a passo detalhada e profunda")
-    answer: str = Field(description="Sua conclusão ou resposta final direta e detalhada")
+    reasoning: str = Field(description="Seu pensamento fluido organizado por seções Markdown (## Título)")
+    answer: str = Field(
+        description=(
+            "Sua conclusão ou resposta final direta e detalhada. "
+            "REGRA CRÍTICA: Comece a responder diretamente. NÃO inclua nenhum título, "
+            "rótulo (como 'Resposta:') ou cabeçalhos Markdown (como '#', '##', '###' ou '**Título**') no início da resposta."
+        )
+    )
 
 
 def get_field(obj, field_name, default=""):
@@ -121,7 +499,10 @@ def get_field(obj, field_name, default=""):
 # ---------------------------------------------------------------------------
 def build_pipeline(llm):
     chain_perguntas = qa_prompt | llm.with_structured_output(QuestionsList)
-    chain_resposta = solucionador_prompt | llm.with_structured_output(QAResult)
+    
+    # Decoupled components
+    thinking_chain = reasoning_prompt | llm
+    answering_chain = answering_prompt | llm.with_structured_output(AnswerResult)
 
     def gerar_dataset_desacoplado(inputs):
         resultado_perguntas = chain_perguntas.invoke(inputs)
@@ -132,9 +513,37 @@ def build_pipeline(llm):
             p_text = get_field(p, "pergunta", "")
             if not p_text:
                 continue
-            resposta = chain_resposta.invoke({"pergunta": p_text})
-            if resposta:
-                dataset.append({"instruction": p_text, "response": resposta})
+            
+            try:
+                # Passo 1: Gerar Raciocínio Fluido (Texto Puro)
+                log.debug("Executando Passo 1: Reasoning para '%s'", p_text[:50])
+                res_thinking = thinking_chain.invoke({"pergunta": p_text})
+                reasoning_text = res_thinking.content if hasattr(res_thinking, 'content') else str(res_thinking)
+                
+                if not reasoning_text:
+                    continue
+
+                # Passo 2: Gerar Resposta Final Estruturada
+                log.debug("Executando Passo 2: Answering para '%s'", p_text[:50])
+                res_answer = answering_chain.invoke({
+                    "pergunta": p_text,
+                    "reasoning": reasoning_text
+                })
+                
+                answer_text = get_field(res_answer, "answer", "")
+                
+                if answer_text:
+                    dataset.append({
+                        "instruction": p_text, 
+                        "response": {
+                            "reasoning": reasoning_text,
+                            "answer": answer_text
+                        }
+                    })
+            except Exception as exc:
+                log.warning("Falha ao processar Q&A individual para '%s': %s", p_text[:30], exc)
+                continue
+                
         return dataset
 
     def roteador_de_lixo(inputs):
@@ -178,28 +587,120 @@ def build_pipeline(llm):
 
 
 
+# ---------------------------------------------------------------------------
+# Pooled LLM for Mistral
+# ---------------------------------------------------------------------------
+from langchain_core.runnables import Runnable
+
+class PooledLLM(Runnable):
+    """A thread-safe proxy that distributes requests across a pool of LLMs."""
+    _global_counters = {} # Shared counter per pool name
+    _lock = threading.Lock()
+
+    def __init__(self, llms, model_name="pool"):
+        self.llms = llms
+        self.model_name = model_name
+        
+        with PooledLLM._lock:
+            if model_name not in PooledLLM._global_counters:
+                PooledLLM._global_counters[model_name] = 0
+
+    def get_next(self):
+        with PooledLLM._lock:
+            idx = PooledLLM._global_counters[self.model_name] % len(self.llms)
+            PooledLLM._global_counters[self.model_name] += 1
+            llm = self.llms[idx]
+            
+            # Log specific model being used for debugging
+            model_id = getattr(llm, "model", getattr(llm, "model_name", "unknown"))
+            log.debug("Pool '%s' selecionando modelo: %s", self.model_name, model_id)
+            return llm
+
+    def with_structured_output(self, schema, **kwargs):
+        return PooledLLM(
+            llms=[llm.with_structured_output(schema, **kwargs) for llm in self.llms],
+            model_name=self.model_name
+        )
+
+    def invoke(self, input, config=None, **kwargs):
+        return self.get_next().invoke(input, config=config, **kwargs)
+
+    def batch(self, inputs, config=None, **kwargs):
+        # LangChain's default batch uses threading. 
+        # Our get_next() is thread-safe, so each item in the batch will pick a different model.
+        return super().batch(inputs, config=config, **kwargs)
+
+
 def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instruct", max_retries: int = 5):
     """Returns (llm, model_name). Supports vllm, gemini, mistral, and deepseek without fallback."""
     provider = provider.lower()
     
     if provider == "gemini":
         try:
-            llm = ChatGoogleGenerativeAI(model=model_name, temperature=0.7, max_retries=max_retries)
-            log.info("LLM iniciado com sucesso: Gemini %s (max_retries=%d)", model_name, max_retries)
-            return llm, model_name
+            paid_key = os.environ.get("GEMINI_API_KEY_PAID") or os.environ.get("GEMINI_API_KEY")
+            free_key = os.environ.get("GEMINI_API_KEY_FREE")
+
+            # PAID key usa modelo fixo configurável via env
+            # FREE key descobre todos os modelos disponíveis dinamicamente
+            paid_model = os.environ.get("GEMINI_PAID_MODEL", model_name)
+
+            if free_key or paid_key:
+                llm = GeminiPoolLLM.build(
+                    free_key=free_key,
+                    paid_key=paid_key,
+                    paid_model=paid_model,
+                    max_retries=max_retries,
+                    max_output_tokens=32768,
+                    probe=True,
+                )
+                effective_model = f"gemini-pool({len(llm._entries)} modelos)"
+                log.info("[GeminiPool] Pronto: %s", effective_model)
+            else:
+                # Fallback legado: usa GEMINI_API_KEY genérica (sem pool)
+                log.warning("Nenhuma GEMINI_API_KEY_FREE/PAID encontrada. Usando GEMINI_API_KEY genérica.")
+                llm = ChatGoogleGenerativeAI(
+                    model=model_name,
+                    temperature=0.5,
+                    max_retries=max_retries,
+                    max_output_tokens=32768,
+                )
+                effective_model = model_name
+                log.info("LLM iniciado: Gemini %s", model_name)
+
+            return llm, effective_model
         except Exception as exc:
-            log.error("Falha ao iniciar Gemini %s: %s", model_name, exc)
+            log.error("Falha ao iniciar Gemini pool: %s", exc)
             raise
 
     elif provider == "mistral":
+        if model_name == "mistral-pool":
+            pool_models = [
+                "mistral-large-latest",
+                "mistral-medium-latest",
+                "mistral-small-latest",
+                "open-mistral-nemo",
+                "ministral-8b-latest",
+                "ministral-3b-latest",
+                "codestral-latest",
+            ]
+            llms = []
+            api_key = os.environ.get("MISTRAL_API_KEY", "MISTRAL_API_KEY_NOT_SET")
+            for m in pool_models:
+                # Mistral output limits vary, 8192 is the safe upper bound for newer models
+                llms.append(ChatMistralAI(model=m, temperature=0.5, max_retries=max_retries, mistral_api_key=api_key, max_tokens=8192))
+            log.info("Iniciando Mistral Pool com %d modelos (max_tokens=8192)", len(llms))
+
+            return PooledLLM(llms, model_name="mistral-pool"), "mistral-pool"
+
         try:
             llm = ChatMistralAI(
                 model=model_name, 
-                temperature=0.7, 
+                temperature=0.5, 
                 max_retries=max_retries,
-                mistral_api_key=os.environ.get("MISTRAL_API_KEY", "MISTRAL_API_KEY_NOT_SET")
+                mistral_api_key=os.environ.get("MISTRAL_API_KEY", "MISTRAL_API_KEY_NOT_SET"),
+                max_tokens=8192
             )
-            log.info("LLM iniciado com sucesso: Mistral %s (max_retries=%d)", model_name, max_retries)
+            log.info("LLM iniciado com sucesso: Mistral %s (max_tokens=8192)", model_name)
             return llm, model_name
         except Exception as exc:
             log.error("Falha ao iniciar Mistral %s: %s", model_name, exc)
@@ -207,15 +708,16 @@ def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instru
 
     elif provider == "deepseek":
         try:
-            # DeepSeek uses an OpenAI-compatible API
+            # DeepSeek V3 supports 8000 output tokens
             llm = ChatOpenAI(
                 model=model_name,
-                temperature=0.7,
+                temperature=0.5,
                 openai_api_base="https://api.deepseek.com",
                 openai_api_key=os.environ.get("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_NOT_SET"),
-                max_retries=max_retries
+                max_retries=max_retries,
+                max_tokens=8192
             )
-            log.info("LLM iniciado com sucesso: DeepSeek %s (max_retries=%d)", model_name, max_retries)
+            log.info("LLM iniciado com sucesso: DeepSeek %s (max_tokens=8192)", model_name)
             return llm, model_name
         except Exception as exc:
             log.error("Falha ao iniciar DeepSeek %s: %s", model_name, exc)
@@ -224,31 +726,25 @@ def init_llm(provider: str = "vllm", model_name: str = "Meta-Llama-3.1-8B-Instru
     elif provider == "vllm":
         vllm_url = os.environ.get("VLLM_BASE_URL", "http://localhost:8000")
         actual_model = model_name
-        # Keep custom mapping if needed, though dynamic models should provide correct names
         if model_name in ("granite4.1:8b", "granite4.1:3b"):
             actual_model = "ibm-granite/granite-4.1-8b-fp8"
         elif model_name == "llama3.2:3b":
             actual_model = "meta-llama/Llama-3.2-3B-Instruct"
 
         try:
-            log.info("Testando conexao com vLLM em: %s", vllm_url)
-            # Use urllib to test without external dependency or just init
-            health_url = f"{vllm_url}/health"
-            with urllib.request.urlopen(health_url, timeout=2) as response:
-                if response.status != 200:
-                    raise Exception(f"Status HTTP {response.status}")
-            
+            # vLLM local can usually handle larger outputs if memory allows
             llm = ChatOpenAI(
                 model=actual_model,
-                temperature=0.7,
+                temperature=0.5,
                 openai_api_base=f"{vllm_url}/v1",
                 openai_api_key="token-vllm-or-anything",
-                max_retries=max_retries
+                max_retries=max_retries,
+                max_tokens=16384
             )
-            log.info("LLM iniciado com sucesso: vLLM %s em %s (max_retries=%d)", actual_model, vllm_url, max_retries)
+            log.info("LLM iniciado com sucesso: vLLM %s (max_tokens=16384)", actual_model)
             return llm, actual_model
         except Exception as exc:
-            log.error("Falha ao iniciar vLLM em %s com modelo %s: %s", vllm_url, actual_model, exc)
+            log.error("Falha ao iniciar vLLM %s: %s", actual_model, exc)
             raise
             
     else:
@@ -365,6 +861,13 @@ def process_pending_files(
             os.remove(local_parquet)
             continue
 
+        # Ingerir corpus brutas no YugabyteDB
+        try:
+            with get_db_connection() as db_conn:
+                save_corpus_to_db(db_conn, df, rf)
+        except Exception as db_exc:
+            log.error("Erro ao salvar corpus no YugabyteDB: %s", db_exc)
+
         results_jsonl = []
         file_discarded = 0
         file_qa = 0
@@ -388,35 +891,66 @@ def process_pending_files(
 
         for batch_idx, i in enumerate(range(0, n_rows_to_process, max_concurrency)):
             batch = rows_to_process[i : i + max_concurrency]
-            batch_inputs = [{"texto": item["texto"]} for item in batch]
+            
+            def execute_batch(items):
+                batch_inputs = [{"texto": item["texto"]} for item in items]
+                return pipeline.batch(
+                    batch_inputs, 
+                    config={"max_concurrency": max_concurrency},
+                    return_exceptions=True
+                )
 
             start_batch = time.time()
             log.info("📦 Processando lote %d/%d (%d itens) do arquivo %s...", batch_idx + 1, total_batches, len(batch), base_name)
             
             try:
-                # O LangChain usará max_concurrency internamente se o runnable suportar,
-                # mas como estamos fatiando manualmente aqui, o batch do runnable
-                # processará todos os itens do nosso 'batch' em paralelo (se configurado).
-                batch_results = pipeline.batch(
-                    batch_inputs, 
-                    config={"max_concurrency": max_concurrency},
-                    return_exceptions=True
-                )
+                batch_results = execute_batch(batch)
             except Exception as exc:
                 log.exception("❌ Erro fatal ao processar lote %d/%d do arquivo %s.", batch_idx + 1, total_batches, base_name)
                 for item in batch:
                     errors.append(f"{base_name}[{item['row_idx']}]: Lote falhou — {exc}")
                 continue
 
+            # Identifica itens para reprocessar (erros transientes ou de schema)
+            to_retry = []
+            final_results = [None] * len(batch)
+            
+            for idx, res in enumerate(batch_results):
+                if isinstance(res, Exception):
+                    err_details = str(res)
+                    # Se for erro de API ou Schema, tentamos mais uma vez
+                    if "ValidationError" in err_details or "JSON" in err_details or "parsing" in err_details.lower() or "timeout" in err_details.lower() or "limit" in err_details.lower():
+                        to_retry.append((idx, batch[idx]))
+                    else:
+                        final_results[idx] = res # Erro crítico, não tenta de novo
+                else:
+                    final_results[idx] = res
+
+            if to_retry:
+                log.info("🔄 Tentando reprocessar %d itens que falharam no lote %d...", len(to_retry), batch_idx + 1)
+                retry_items = [item for _, item in to_retry]
+                retry_results = execute_batch(retry_items)
+                for (orig_idx, _), retry_res in zip(to_retry, retry_results):
+                    final_results[orig_idx] = retry_res
+
             batch_qa_count = 0
-            for item, res in zip(batch, batch_results):
+            for item, res in zip(batch, final_results):
                 row_idx = item["row_idx"]
                 source = item["source"]
                 texto = item["texto"]
 
                 if isinstance(res, Exception):
-                    log.exception("⚠️ Erro na linha %d do arquivo %s.", row_idx, base_name)
-                    msg = f"{base_name}[{row_idx}]: {res}"
+                    # Identifica o tipo de erro final
+                    err_type = "API_ERROR"
+                    err_details = str(res)
+                    
+                    if "ValidationError" in err_details or "JSON" in err_details or "parsing" in err_details.lower():
+                        err_type = "SCHEMA_MISMATCH"
+                        log.error("❌ Linha %d: Modelo gerou dados fora do padrão (Schema Mismatch) após retry. Erro: %s", row_idx, err_details)
+                    else:
+                        log.error("❌ Linha %d: Falha na API/Rede após retry. Erro: %s", row_idx, err_details)
+                    
+                    msg = f"{base_name}[{row_idx}] [{err_type}]: {err_details}"
                     errors.append(msg)
                     continue
 
@@ -428,9 +962,13 @@ def process_pending_files(
 
                 if status == "descartado_para_revisao":
                     file_discarded += 1
-                    log.debug("🗑️ Linha %d descartada (baixa utilidade).", row_idx)
+                    log.info("🗑️ Linha %d: Todos os samples foram descartados (Texto de baixa utilidade).", row_idx)
                 elif status == "processado_com_sucesso":
                     instrucoes = res.get("dataset_instrucoes") or []
+                    if not instrucoes:
+                        log.warning("⚠️ Linha %d: Processado com sucesso mas nenhum Q&A foi gerado.", row_idx)
+                        continue
+                        
                     for qa in instrucoes:
                         resposta_obj = qa["response"]
                         results_jsonl.append({
@@ -471,6 +1009,13 @@ def process_pending_files(
         with open(local_jsonl, "w", encoding="utf-8") as f:
             for item in results_jsonl:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+        # Ingerir Q&A no YugabyteDB
+        try:
+            with get_db_connection() as db_conn:
+                save_qa_to_db(db_conn, results_jsonl, rf)
+        except Exception as db_exc:
+            log.error("Erro ao salvar Q&A no YugabyteDB: %s", db_exc)
 
         log.info("⬆️  Enviando %s para gs://%s/%s%s …", out_name, bucket_name, out_prefix, out_name)
         bucket.blob(f"{out_prefix}{out_name}").upload_from_filename(local_jsonl)

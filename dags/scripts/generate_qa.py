@@ -256,7 +256,7 @@ def get_db_connection():
         user=os.environ.get("PG_USER", "yugabyte"),
         password=os.environ.get("PG_PASSWORD", "YugabytePass2026"),
         database=os.environ.get("PG_DATABASE", "ai_labs"),
-        sslmode="require"
+        sslmode="disable"
     )
 
 def clean_string(s):

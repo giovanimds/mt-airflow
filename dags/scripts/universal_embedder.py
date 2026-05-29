@@ -20,14 +20,19 @@ BATCH_SIZE = int(os.environ.get("EMBEDDER_BATCH_SIZE", "100"))
 POLL_TIMEOUT_SEC = int(os.environ.get("EMBEDDER_POLL_TIMEOUT", "5"))
 
 def get_db_connection(dbname):
-    return psycopg2.connect(
-        host=os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
-        port=int(os.environ.get("PG_PORT", 5432)),
-        user=os.environ.get("PG_USER", "yugabyte"),
-        password=os.environ.get("PG_PASSWORD", "YugabytePass2026"),
-        database=dbname,
-        sslmode="disable"
-    )
+    params = {
+        "host": os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
+        "port": int(os.environ.get("PG_PORT", 5432)),
+        "user": os.environ.get("PG_USER", "yugabyte"),
+        "password": os.environ.get("PG_PASSWORD", "YugabytePass2026"),
+        "database": dbname,
+        "sslmode": "disable"
+    }
+    try:
+        return psycopg2.connect(**params, load_balance=True)
+    except TypeError:
+        return psycopg2.connect(**params)
+
 
 def process_batch(batch):
     if not batch:

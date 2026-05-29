@@ -15,14 +15,18 @@ log = logging.getLogger(__name__)
 REDIS_URL = os.environ.get("REDIS_URL", "redis://valkey-primary.default.svc.cluster.local:6379")
 
 def get_db_connection():
-    return psycopg2.connect(
-        host=os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
-        port=int(os.environ.get("PG_PORT", 5432)),
-        user=os.environ.get("PG_USER", "yugabyte"),
-        password=os.environ.get("PG_PASSWORD", "YugabytePass2026"),
-        database=os.environ.get("PG_DATABASE", "ai_labs"),
-        sslmode="disable"
-    )
+    params = {
+        "host": os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
+        "port": int(os.environ.get("PG_PORT", 5432)),
+        "user": os.environ.get("PG_USER", "yugabyte"),
+        "password": os.environ.get("PG_PASSWORD", "YugabytePass2026"),
+        "database": os.environ.get("PG_DATABASE", "ai_labs"),
+        "sslmode": "disable"
+    }
+    try:
+        return psycopg2.connect(**params, load_balance=True)
+    except TypeError:
+        return psycopg2.connect(**params)
 
 def clean_val(v):
     if v is None:

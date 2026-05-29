@@ -20,14 +20,19 @@ class DailyQuotaExceededException(Exception):
     pass
 
 def get_db_connection():
-    return psycopg2.connect(
-        host=os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
-        port=int(os.environ.get("PG_PORT", 5432)),
-        user=os.environ.get("PG_USER", "yugabyte"),
-        password=os.environ.get("PG_PASSWORD", "YugabytePass2026"),
-        database=os.environ.get("PG_DATABASE", "ai_labs"),
-        sslmode="disable"
-    )
+    params = {
+        "host": os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
+        "port": int(os.environ.get("PG_PORT", 5432)),
+        "user": os.environ.get("PG_USER", "yugabyte"),
+        "password": os.environ.get("PG_PASSWORD", "YugabytePass2026"),
+        "database": os.environ.get("PG_DATABASE", "ai_labs"),
+        "sslmode": "disable"
+    }
+    try:
+        return psycopg2.connect(**params, load_balance=True)
+    except TypeError:
+        return psycopg2.connect(**params)
+
 
 PAID_KEY = os.environ.get("GEMINI_API_KEY_PAID") or os.environ.get("GEMINI_API_KEY")
 FREE_KEY = os.environ.get("GEMINI_API_KEY_FREE")

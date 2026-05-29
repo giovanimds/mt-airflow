@@ -66,14 +66,18 @@ class YugabyteDBCorpusPipeline:
 
     def open_spider(self, spider):
         spider.logger.info(f"Conectando ao YugabyteDB em {self.db_host}:{self.db_port}/{self.db_name} e Valkey em {self.redis_url}")
-        self.db_conn = psycopg2.connect(
-            host=self.db_host,
-            port=self.db_port,
-            user=self.db_user,
-            password=self.db_pass,
-            database=self.db_name,
-            sslmode="disable"
-        )
+        params = {
+            "host": self.db_host,
+            "port": self.db_port,
+            "user": self.db_user,
+            "password": self.db_pass,
+            "database": self.db_name,
+            "sslmode": "disable"
+        }
+        try:
+            self.db_conn = psycopg2.connect(**params, load_balance=True)
+        except TypeError:
+            self.db_conn = psycopg2.connect(**params)
         self.redis_client = redis.Redis.from_url(self.redis_url)
 
     def close_spider(self, spider):

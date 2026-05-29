@@ -250,14 +250,18 @@ class GeminiPoolLLM:
 # ---------------------------------------------------------------------------
 def get_db_connection():
     import psycopg2
-    return psycopg2.connect(
-        host=os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
-        port=int(os.environ.get("PG_PORT", 5432)),
-        user=os.environ.get("PG_USER", "yugabyte"),
-        password=os.environ.get("PG_PASSWORD", "YugabytePass2026"),
-        database=os.environ.get("PG_DATABASE", "ai_labs"),
-        sslmode="require"
-    )
+    params = {
+        "host": os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
+        "port": int(os.environ.get("PG_PORT", 5432)),
+        "user": os.environ.get("PG_USER", "yugabyte"),
+        "password": os.environ.get("PG_PASSWORD", "YugabytePass2026"),
+        "database": os.environ.get("PG_DATABASE", "ai_labs"),
+        "sslmode": "require"
+    }
+    try:
+        return psycopg2.connect(**params, load_balance=True)
+    except TypeError:
+        return psycopg2.connect(**params)
 
 def clean_string(s):
     if s is None:

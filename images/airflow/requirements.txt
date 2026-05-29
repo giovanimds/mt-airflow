@@ -1,0 +1,8 @@
+polars
+langchain-openai
+langchain-mistralai
+langchain-google-genai
+langchain-core
+langchain-community
+google-cloud-storage
+psycopg2-yugabytedb>=2.9.3.5

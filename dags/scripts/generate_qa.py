@@ -873,12 +873,19 @@ def process_pending_files(
         file_qa = 0
 
         rows_to_process = []
+        MAX_TEXT_CHARS = int(os.environ.get("MAX_TEXT_CHARS", 250_000)) # ~62k tokens (DeepSeek safe limit)
+
         for row_idx, row in enumerate(df.iter_rows(named=True)):
             texto = row.get("text", "")
             source = row.get("url", row.get("title", ""))
             if not texto:
                 log.debug("Linha %d vazia, pulando.", row_idx)
                 continue
+            
+            if len(texto) > MAX_TEXT_CHARS:
+                log.warning("📄 Linha %d: Texto muito longo (%d chars). Truncando para %d.", row_idx, len(texto), MAX_TEXT_CHARS)
+                texto = texto[:MAX_TEXT_CHARS] + "\n\n[... TEXTO TRUNCADO POR TAMANHO ...]"
+
             rows_to_process.append({
                 "row_idx": row_idx,
                 "texto": texto,
@@ -947,6 +954,10 @@ def process_pending_files(
                     if "ValidationError" in err_details or "JSON" in err_details or "parsing" in err_details.lower():
                         err_type = "SCHEMA_MISMATCH"
                         log.error("❌ Linha %d: Modelo gerou dados fora do padrão (Schema Mismatch) após retry. Erro: %s", row_idx, err_details)
+                    elif any(kw in err_details.lower() for kw in ["too large", "context_length", "context length", "maximum context length", "400"]):
+                        # Erros de 400 da Mistral/OpenAI costumam ser tamanho de contexto
+                        err_type = "CONTEXT_EXCEEDED"
+                        log.error("❌ Linha %d: Contexto excedido (ou erro 400). Erro: %s", row_idx, err_details)
                     else:
                         log.error("❌ Linha %d: Falha na API/Rede após retry. Erro: %s", row_idx, err_details)
                     

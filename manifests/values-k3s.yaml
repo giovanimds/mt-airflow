@@ -15,6 +15,9 @@ config:
     remote_logging: 'True'
     remote_base_log_folder: 'gs://mt-airflow/logs'
     remote_log_conn_id: 'google_cloud_default'
+  database:
+    sql_alchemy_pool_size: 15
+    sql_alchemy_max_overflow: 30
 
 
 env:
@@ -33,6 +36,16 @@ extraEnv: |
       secretKeyRef:
         name: gemini-secrets
         key: google-api-key
+  - name: GEMINI_API_KEY_FREE
+    valueFrom:
+      secretKeyRef:
+        name: airflow-api-keys
+        key: GEMINI_API_KEY_FREE
+  - name: GEMINI_API_KEY_PAID
+    valueFrom:
+      secretKeyRef:
+        name: airflow-api-keys
+        key: GEMINI_API_KEY_PAID
   - name: DEEPSEEK_API_KEY
     valueFrom:
       secretKeyRef:
@@ -41,13 +54,17 @@ extraEnv: |
   - name: MISTRAL_API_KEY
     valueFrom:
       secretKeyRef:
-        name: gemini-secrets
-        key: mistral-api-key
+        name: airflow-api-keys
+        key: MISTRAL_API_KEY
+  - name: GEMINI_PAID_MODEL
+    value: gemini-2.5-flash-lite
+  - name: PG_HOST
+    value: postgres.morescotech.com.br
 
 volumes:
   - name: gcp-service-account
     secret:
-      secretName: airflow-gcp-sa
+      secretName: airflow-gcp-key
 
 volumeMounts:
   - name: gcp-service-account
@@ -55,12 +72,14 @@ volumeMounts:
     readOnly: true
 
 data:
-  metadataSecretName: airflow-metadata
-  resultBackendSecretName: airflow-result-backend
+  metadataConnection:
+    user: yugabyte
+    pass: YugabytePass2026
+    host: postgres.default.svc.cluster.local
+    port: 5432
+    db: airflow
+    protocol: postgresql
 
-fernetKeySecretName: airflow-fernet
-apiSecretKeySecretName: airflow-api
-jwtSecretName: airflow-jwt
 
 postgresql:
   enabled: false
@@ -131,10 +150,10 @@ dagProcessor:
   resources:
     requests:
       cpu: 100m
-      memory: 256Mi
-    limits:
-      cpu: 300m
       memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
 
 workers:
   celery:
@@ -174,6 +193,12 @@ ingress:
     ingressClassName: traefik
     hosts:
       - name: "airflow.morescotech.com.br"
+    annotations:
+      traefik.ingress.kubernetes.io/router.entrypoints: websecure
+      traefik.ingress.kubernetes.io/router.tls: "true"
+    tls:
+      enabled: true
+      secretName: wildcard-morescotech-tls
   flower:
     enabled: false
 

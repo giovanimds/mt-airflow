@@ -572,7 +572,7 @@ def build_pipeline(llm):
         )
 
         tarefas_paralelas["status_pipeline"] = lambda _: "processado_com_sucesso"
-        return RunnableParallel(**tarefas_paralelas)
+        return RunnableParallel(**tarefas_paralelas).invoke(inputs)
 
     return (
         abstract_prompt | llm.with_structured_output(AbstractResult)

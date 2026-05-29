@@ -365,6 +365,21 @@ Texto Bruto:
 """
 )
 
+consolidation_prompt = ChatPromptTemplate.from_template(
+    """Você é um pesquisador sênior consolidando múltiplos resumos parciais de um mesmo artigo científico.
+Sua tarefa é criar um resumo único, coerente e abrangente que capture todas as descobertas principais, metodologias e conclusões mencionadas nos fragmentos abaixo.
+
+Resumos Parciais:
+{resumos_parciais}
+
+Regras:
+- Remova redundâncias entre os fragmentos.
+- Mantenha a terminologia técnica original.
+- O resultado final deve ser um resumo fluido e estruturado.
+"""
+)
+
+
 meta_prompt = ChatPromptTemplate.from_template(
     """Com base no resumo acadêmico fornecido, extraia os metadados metodológicos solicitados.
 
@@ -504,6 +519,65 @@ def build_pipeline(llm):
     thinking_chain = reasoning_prompt | llm
     answering_chain = answering_prompt | llm.with_structured_output(AnswerResult)
 
+    def robust_abstract_extraction(inputs):
+        """
+        Extrai o resumo de forma robusta. Se o texto for muito grande,
+        usa uma estratégia de Map-Reduce para não perder contexto.
+        """
+        texto = inputs.get("texto", "")
+        # Parâmetros de chunking (em caracteres)
+        MAX_BLOCK = 160_000 
+        CHUNK_SIZE = 120_000
+        OVERLAP = 10_000
+
+        if len(texto) <= MAX_BLOCK:
+            return (abstract_prompt | llm.with_structured_output(AbstractResult)).invoke(inputs)
+        
+        log.info("🔍 Artigo grande (%d chars). Iniciando Map-Reduce para consolidação de resumo...", len(texto))
+        
+        # 1. Map: Gera resumos parciais para cada chunk
+        chunks = []
+        for i in range(0, len(texto), CHUNK_SIZE - OVERLAP):
+            chunks.append(texto[i : i + CHUNK_SIZE])
+            if i + CHUNK_SIZE >= len(texto):
+                break
+        
+        log.debug("Dividido em %d chunks para mapeamento.", len(chunks))
+        partial_chain = abstract_prompt | llm.with_structured_output(AbstractResult)
+        
+        # Batch invoke para os chunks (aproveita concorrência se o provider suportar)
+        partials = partial_chain.batch([{"texto": c} for c in chunks])
+        
+        # 2. Reduce: Consolida resumos parciais em um global
+        resumos_text = ""
+        todas_keywords = set()
+        for idx, p in enumerate(partials):
+            if isinstance(p, Exception):
+                log.warning("Falha no chunk %d do Map-Reduce: %s", idx, p)
+                continue
+            
+            p_abstract = get_field(p, "abstract", "")
+            if p_abstract:
+                resumos_text += f"\n--- FRAGMENTO {idx+1} ---\n{p_abstract}\n"
+            
+            p_keywords = get_field(p, "keywords", [])
+            if isinstance(p_keywords, list):
+                todas_keywords.update(p_keywords)
+
+        if not resumos_text:
+            return AbstractResult(abstract="", keywords=[])
+
+        log.debug("Consolidando %d resumos parciais...", len(partials))
+        final_abstract = (consolidation_prompt | llm.with_structured_output(AbstractResult)).invoke({
+            "resumos_parciais": resumos_text
+        })
+        
+        # Mescla as keywords originais com as consolidadas
+        consolidated_keywords = set(get_field(final_abstract, "keywords", []))
+        final_abstract.keywords = list(consolidated_keywords | todas_keywords)
+        
+        return final_abstract
+
     def gerar_dataset_desacoplado(inputs):
         resultado_perguntas = chain_perguntas.invoke(inputs)
         lista_perguntas = get_field(resultado_perguntas, "perguntas", []) if resultado_perguntas else []
@@ -575,7 +649,7 @@ def build_pipeline(llm):
         return RunnableParallel(**tarefas_paralelas).invoke(inputs)
 
     return (
-        abstract_prompt | llm.with_structured_output(AbstractResult)
+        RunnableLambda(robust_abstract_extraction)
         | {
             "fase_1": lambda x: x,
             "fase_2": {"abstract": lambda x: get_field(x, "abstract", "") if x else ""} | meta_prompt | llm.with_structured_output(MetaResult),
@@ -873,11 +947,6 @@ def process_pending_files(
         file_qa = 0
 
         rows_to_process = []
-        # Limite de segurança para processamento em bloco único (~62k tokens)
-        SINGLE_BLOCK_MAX_CHARS = int(os.environ.get("MAX_TEXT_CHARS", 250_000)) 
-        # Tamanho do chunk para artigos gigantes (garante que cada chunk tenha contexto suficiente)
-        CHUNK_SIZE = 150_000 
-
         for row_idx, row in enumerate(df.iter_rows(named=True)):
             texto = row.get("text", "")
             source = row.get("url", row.get("title", ""))
@@ -885,22 +954,11 @@ def process_pending_files(
                 log.debug("Linha %d vazia, pulando.", row_idx)
                 continue
             
-            if len(texto) > SINGLE_BLOCK_MAX_CHARS:
-                log.info("📄 Linha %d: Artigo gigante (%d chars). Dividindo em chunks de %d.", row_idx, len(texto), CHUNK_SIZE)
-                # Divide o texto em blocos para gerar múltiplos Q&As do mesmo artigo
-                for chunk_idx, i in enumerate(range(0, len(texto), CHUNK_SIZE)):
-                    chunk_text = texto[i : i + CHUNK_SIZE]
-                    rows_to_process.append({
-                        "row_idx": f"{row_idx}_chunk{chunk_idx}",
-                        "texto": chunk_text,
-                        "source": f"{source} [Parte {chunk_idx + 1}]"
-                    })
-            else:
-                rows_to_process.append({
-                    "row_idx": row_idx,
-                    "texto": texto,
-                    "source": source
-                })
+            rows_to_process.append({
+                "row_idx": row_idx,
+                "texto": texto,
+                "source": source
+            })
 
         n_rows_to_process = len(rows_to_process)
         total_batches = (n_rows_to_process + max_concurrency - 1) // max_concurrency

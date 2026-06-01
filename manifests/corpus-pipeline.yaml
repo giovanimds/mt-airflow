@@ -6,7 +6,7 @@ metadata:
   labels:
     app: universal-embedder
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: universal-embedder
@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: embedder
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: registry.morescotech.com.br:5000/corpus-scraper:v1.8
         imagePullPolicy: Always
         command: ["python", "universal_embedder.py"]
         env:
@@ -38,6 +38,14 @@ spec:
             secretKeyRef:
               name: airflow-api-keys
               key: MISTRAL_API_KEY
+        - name: MAX_CONCURRENT_REQUESTS
+          value: "1"
+        - name: EMBEDDER_QUEUE_NAME
+          value: "embedder_queue"
+        - name: EMBEDDER_BATCH_SIZE
+          value: "100"
+        - name: EMBEDDER_POLL_TIMEOUT
+          value: "5"
         resources:
           requests:
             cpu: 100m
@@ -65,7 +73,7 @@ spec:
     spec:
       containers:
       - name: cleaner
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: 192.168.0.7:5000/corpus-scraper:v1.0
         imagePullPolicy: Always
         command: ["python", "corpus_cleaner.py"]
         env:
@@ -120,7 +128,7 @@ spec:
     spec:
       containers:
       - name: generator
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: 192.168.0.7:5000/corpus-scraper:v1.0
         imagePullPolicy: Always
         command: ["python", "generate_qa.py"]
         env:
@@ -186,7 +194,7 @@ spec:
     spec:
       containers:
       - name: scraper
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: 192.168.0.7:5000/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
         - name: MAX_DOCUMENTS
@@ -234,7 +242,7 @@ spec:
     spec:
       containers:
       - name: scraper
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: 192.168.0.7:5000/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
         - name: MAX_DOCUMENTS
@@ -282,7 +290,7 @@ spec:
     spec:
       containers:
       - name: scraper
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: 192.168.0.7:5000/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
         - name: MAX_DOCUMENTS
@@ -330,7 +338,7 @@ spec:
     spec:
       containers:
       - name: scraper
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: 192.168.0.7:5000/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
         - name: MAX_DOCUMENTS
@@ -378,7 +386,7 @@ spec:
     spec:
       containers:
       - name: scraper
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: 192.168.0.7:5000/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
         - name: MAX_DOCUMENTS
@@ -426,7 +434,7 @@ spec:
     spec:
       containers:
       - name: scraper
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: 192.168.0.7:5000/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
         - name: MAX_DOCUMENTS
@@ -474,7 +482,7 @@ spec:
     spec:
       containers:
       - name: scraper
-        image: registry.morescotech.com.br/corpus-scraper:v1.0
+        image: 192.168.0.7:5000/corpus-scraper:v1.0
         imagePullPolicy: Always
         env:
         - name: MAX_DOCUMENTS

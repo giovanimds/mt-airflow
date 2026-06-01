@@ -181,12 +181,16 @@ class GeminiPoolLLM:
                     return entry
             return None  # todos em cooldown
 
-    def _mark_cooldown(self, entry: dict):
+    def _is_daily_limit_error(self, exc: Exception) -> bool:
+        s = str(exc).lower()
+        return "daily" in s or "day" in s or "user rate limit exceeded" in s
+
+    def _mark_cooldown(self, entry: dict, seconds: float = 60.0):
         with _GEMINI_POOL_LOCK:
-            entry["cooldown_until"] = time.time() + self.COOLDOWN_SECONDS
+            entry["cooldown_until"] = time.time() + seconds
         log.warning(
             "[GeminiPool] 🔴 %s (%s) em cooldown %ds.",
-            entry["model_id"], entry["key_name"], int(self.COOLDOWN_SECONDS),
+            entry["model_id"], entry["key_name"], int(seconds),
         )
 
     def _invoke_with_pool(self, method_name: str, *args, **kwargs):
@@ -203,8 +207,12 @@ class GeminiPoolLLM:
                 # Todos em cooldown — aguarda o menor cooldown e retenta
                 with _GEMINI_POOL_LOCK:
                     now = time.time()
-                    wait = min(e["cooldown_until"] - now for e in self._entries)
-                wait = max(1.0, wait)
+                    # Filter out models that have daily quota limits (long cooldowns)
+                    active_cooldowns = [e["cooldown_until"] - now for e in self._entries if e["cooldown_until"] - now < 3000]
+                    if active_cooldowns:
+                        wait = max(1.0, min(active_cooldowns))
+                    else:
+                        raise RuntimeError("[GeminiPool] Todos os modelos esgotaram a cota diária ou de minuto.")
                 log.warning("[GeminiPool] Todos os modelos em cooldown. Aguardando %.0fs...", wait)
                 time.sleep(wait)
                 entry = self._get_next_available()
@@ -222,7 +230,12 @@ class GeminiPoolLLM:
                 return method(*args, **kwargs)
             except Exception as exc:
                 if self._is_rate_limit_error(exc):
-                    self._mark_cooldown(entry)
+                    if self._is_daily_limit_error(exc):
+                        # Daily limit -> long cooldown of 24h
+                        self._mark_cooldown(entry, 86400.0)
+                    else:
+                        # Minute limit -> 60s cooldown
+                        self._mark_cooldown(entry, 60.0)
                     log.info("[GeminiPool] Tentando próximo modelo do pool...")
                     continue
                 raise  # Erro não-recuperável

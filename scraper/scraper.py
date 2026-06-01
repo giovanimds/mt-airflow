@@ -156,7 +156,8 @@ class WikipediaPTSpider(scrapy.Spider):
     name = "wikipedia_pt"
     allowed_domains = ["pt.wikipedia.org"]
 
-    def start_requests(self):
+    async def start(self):
+        self.logger.info(">>> INICIANDO START_REQUESTS DO WIKIPEDIA <<<")
         redis_url = self.settings.get("REDIS_URL") or os.environ.get("REDIS_URL", "redis://valkey-primary.default.svc.cluster.local:6379")
         topic = get_search_topic(redis_url)
         if topic:
@@ -247,7 +248,7 @@ class ArxivSpider(scrapy.Spider):
         'USER_AGENT': 'Mozilla/5.0 (compatible; mt-airflow-scraper/1.0; +http://example.com)'
     }
 
-    def start_requests(self):
+    async def start(self):
         redis_url = self.settings.get("REDIS_URL") or os.environ.get("REDIS_URL", "redis://valkey-primary.default.svc.cluster.local:6379")
         topic = get_search_topic(redis_url)
         if topic:
@@ -389,7 +390,7 @@ class SciELOSpider(scrapy.Spider):
 class BdtdSpider(scrapy.Spider):
     name = "bdtd_pt"
 
-    def start_requests(self):
+    async def start(self):
         redis_url = self.settings.get("REDIS_URL") or os.environ.get("REDIS_URL", "redis://valkey-primary.default.svc.cluster.local:6379")
         topic = get_search_topic(redis_url)
         if topic:

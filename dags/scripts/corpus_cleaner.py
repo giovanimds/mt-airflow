@@ -95,10 +95,7 @@ def _init_pool():
                 if _probe_model(FREE_KEY, mid):
                     entries.append({"key": FREE_KEY, "model_id": mid,
                                     "key_name": "FREE", "cooldown_until": 0.0})
-        if PAID_KEY:
-            entries.append({"key": PAID_KEY, "model_id": PAID_MODEL,
-                            "key_name": "PAID", "cooldown_until": 0.0})
-            log.info("[Pool] PAID adicionado: %s", PAID_MODEL)
+
         if not entries:
             log.error("[Pool] Nenhum modelo disponível após probe!")
         else:
@@ -173,11 +170,17 @@ TEXTO BRUTO:
             with _POOL_LOCK:
                 now = time.time()
                 if _POOL:
-                    wait = max(1.0, min(e["cooldown_until"] - now for e in _POOL))
+                    # filter out models with indefinitely long cooldowns (daily quota limit)
+                    active_cooldowns = [e["cooldown_until"] - now for e in _POOL if e["cooldown_until"] - now < 3000]
+                    if active_cooldowns:
+                        wait = max(1.0, min(active_cooldowns))
+                    else:
+                        log.error("[Pool] Todos os modelos ativos esgotaram cota diária ou de minuto.")
+                        raise DailyQuotaExceededException("Todos os modelos esgotaram a cota diária.")
                 else:
                     log.error("[Pool] Pool vazio — sem modelos disponíveis.")
-                    return None
-            log.warning("[Pool] Todos em cooldown. Aguardando %.0fs...", wait)
+                    raise DailyQuotaExceededException("Pool vazio — sem modelos disponíveis.")
+            log.warning("[Pool] Todos em cooldown de minuto. Aguardando %.0fs...", wait)
             time.sleep(wait)
             entry = _get_next_pool_entry()
             if entry is None:
@@ -193,21 +196,44 @@ TEXTO BRUTO:
         try:
             genai.configure(api_key=entry["key"])
             model = genai.GenerativeModel(mid)
+            timeout = 90.0 if "gemma" in mid.lower() else 30.0
+            
+            gen_config = None
+            if "gemma" not in mid.lower():
+                gen_config = genai.types.GenerationConfig(response_mime_type="application/json")
+                
             response = model.generate_content(
                 prompt,
-                generation_config=genai.types.GenerationConfig(
-                    response_mime_type="application/json",
-                ),
-                request_options={"timeout": 30.0}
+                generation_config=gen_config,
+                request_options={"timeout": timeout}
             )
-            return json.loads(response.text)
+            
+            resp_text = response.text.strip()
+            # If JSON parsing fails directly, try extracting JSON from markdown fences
+            try:
+                return json.loads(resp_text)
+            except json.JSONDecodeError:
+                if "```json" in resp_text:
+                    resp_text = resp_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in resp_text:
+                    resp_text = resp_text.split("```")[1].split("```")[0].strip()
+                return json.loads(resp_text)
         except Exception as e:
+            # If it's a JSON Decode Error, we shouldn't put the model in cooldown
+            if isinstance(e, json.JSONDecodeError):
+                log.error("[Pool] Falha ao decodificar JSON gerado por %s: %s", mid, e)
+                # Try next model in pool instead of returning None directly
+                continue
             if _is_rate_limit(e):
-                _mark_pool_cooldown(entry)
                 if _is_daily_limit(e):
-                    raise DailyQuotaExceededException(f"Cota diária (RPD) excedida no modelo {mid}: {e}")
+                    # Mark model with daily limit (long cooldown of 24h)
+                    with _POOL_LOCK:
+                        entry["cooldown_until"] = time.time() + 86400.0
+                    log.warning("[Pool] 🔴 Cota diária excedida para %s (%s). Desativando por 24h.", mid, entry["key_name"])
+                    continue
                 else:
-                    raise QuotaExceededException(f"Cota de minutos (RPM) excedida no modelo {mid}: {e}")
+                    _mark_pool_cooldown(entry)
+                    continue
             log.error("[Pool] Erro não-recuperável em %s: %s", mid, e)
             return None
 
@@ -351,9 +377,10 @@ def main():
                     process_item(r, queue_name, raw_id)
                     processed = True
                 except DailyQuotaExceededException:
-                    # Cota diária: hibernar por 1 hora
-                    log.warning("Cota diária atingida. Entrando em hibernação profunda por 1 hora (3600s)...")
-                    time.sleep(3600)
+                    log.warning("Cota diária atingida. Devolvendo item para a fila e encerrando o pod...")
+                    r.lpush("raw_corpus_queue", payload_json)
+                    import sys
+                    sys.exit(0)
                 except QuotaExceededException:
                     # Cota de minutos: hibernar por 60s
                     log.warning("Cota de minuto atingida. Aguardando 60 segundos...")

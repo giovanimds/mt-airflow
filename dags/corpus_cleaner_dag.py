@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.cncf.kubernetes.secret import Secret
+from kubernetes.client import models as k8s
 
 log = logging.getLogger(__name__)
 
@@ -42,10 +43,10 @@ with DAG(
             "PG_DATABASE": "ai_labs",
         },
         secrets=[gemini_free_key],
-        resources={
-            "requests": {"cpu": "200m", "memory": "512Mi"},
-            "limits": {"cpu": "1000m", "memory": "2Gi"},
-        },
+        resources=k8s.V1ResourceRequirements(
+            requests={"cpu": "200m", "memory": "512Mi"},
+            limits={"cpu": "1000m", "memory": "2Gi"},
+        ),
         image_pull_policy="Always",
         get_logs=True,
         is_delete_operator_pod=True,

@@ -3,11 +3,13 @@ import json
 import logging
 import time
 import traceback
+import re
 import psycopg2
 from psycopg2.extras import execute_values
-from langchain_mistralai import MistralAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from openai import OpenAI, RateLimitError, AuthenticationError
+import httpx
 import redis
+import requests
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,17 +23,16 @@ BATCH_SIZE = int(os.environ.get("EMBEDDER_BATCH_SIZE", "100"))
 POLL_TIMEOUT_SEC = int(os.environ.get("EMBEDDER_POLL_TIMEOUT", "5"))
 MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "1"))
 
-# Configure text splitter for chunking long texts
 # Mistral embed model supports up to 8192 tokens, so we use 8000 to be safe
-TEXT_SPLITTER = RecursiveCharacterTextSplitter(
-    chunk_size=8000,
-    chunk_overlap=200,
-    length_function=lambda text: len(text.split()),
-    separators=["\n\n", "\n", ". ", "! ", "? ", ", ", " ", ""]
-)
+MAX_TOKENS_PER_CHUNK = 8000
+EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "32"))  # Max batch size for Mistral API
+
+# Global tokenizer cache
+_TOKENIZER = None
 
 
 def get_db_connection(dbname):
+    """Get database connection."""
     params = {
         "host": os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
         "port": int(os.environ.get("PG_PORT", 5432)),
@@ -46,28 +47,162 @@ def get_db_connection(dbname):
         return psycopg2.connect(**params)
 
 
-def split_text_into_chunks(text, max_tokens=8000):
+def get_tokenizer():
+    """Get or create Mistral tokenizer for accurate token counting."""
+    global _TOKENIZER
+    
+    if _TOKENIZER is not None:
+        return _TOKENIZER
+    
+    # Try to use sentencepiece if available (used by Mistral tokenizer)
+    try:
+        import sentencepiece as spm
+        
+        # Download mistral tokenizer model file
+        tokenizer_url = "https://huggingface.co/mistralai/Mistral-7B-v0.1/resolve/main/tokenizer.model"
+        tokenizer_path = "/tmp/mistral_tokenizer.model"
+        
+        response = requests.get(tokenizer_url, timeout=30)
+        response.raise_for_status()
+        
+        with open(tokenizer_path, "wb") as f:
+            f.write(response.content)
+        
+        _TOKENIZER = spm.SentencePieceProcessor()
+        _TOKENIZER.load(tokenizer_path)
+        
+        log.info("✅ Tokenizer Mistral (SentencePiece) baixado e carregado com sucesso")
+        return _TOKENIZER
+        
+    except ImportError:
+        log.warning("SentencePiece não disponível, tentando HuggingFace tokenizers...")
+    except Exception as e:
+        log.error(f"⚠️  Falha ao baixar tokenizer SentencePiece: {e}")
+        log.warning("Tentando HuggingFace tokenizers...")
+    
+    # Try HuggingFace tokenizers library
+    try:
+        from tokenizers import Tokenizer
+        from tokenizers.models import BPE
+        from tokenizers.pre_tokenizers import WhitespaceSplit
+        
+        # Download mistral tokenizer.json and vocab.json
+        tokenizer_url = "https://huggingface.co/mistralai/Mistral-7B-v0.1/resolve/main/tokenizer.json"
+        tokenizer_path = "/tmp/mistral_tokenizer.json"
+        vocab_url = "https://huggingface.co/mistralai/Mistral-7B-v0.1/resolve/main/vocab.json"
+        vocab_path = "/tmp/mistral_vocab.json"
+        
+        response = requests.get(tokenizer_url, timeout=30)
+        response.raise_for_status()
+        with open(tokenizer_path, "wb") as f:
+            f.write(response.content)
+        
+        response = requests.get(vocab_url, timeout=30)
+        response.raise_for_status()
+        with open(vocab_path, "wb") as f:
+            f.write(response.content)
+        
+        _TOKENIZER = Tokenizer(BPE(vocab_path, tokenizer_path))
+        _TOKENIZER.pre_tokenizer = WhitespaceSplit()
+        
+        log.info("✅ Tokenizer Mistral (HuggingFace) baixado e carregado com sucesso")
+        return _TOKENIZER
+        
+    except ImportError:
+        log.warning("HuggingFace tokenizers não disponível")
+    except Exception as e:
+        log.error(f"⚠️  Falha ao baixar tokenizer HuggingFace: {e}")
+    
+    # Ultimate fallback: use a simple token approximation
+    log.warning("Usando fallback de contagem de tokens baseada em regex (menos precisa)")
+    
+    class SimpleTokenizer:
+        def __init__(self):
+            # Approximation based on common tokenization patterns
+            self.pattern = re.compile(r"'s|'t|'re|'ve|'m|'ll|\w+|[^\\w\\s]|")
+        
+        def encode(self, text):
+            tokens = self.pattern.findall(text.lower())
+            return type('Encoding', (), {'ids': list(range(len(tokens))), 'tokens': tokens})()
+        
+        def decode(self, ids):
+            # For fallback, just return the original text
+            return ""
+    
+    _TOKENIZER = SimpleTokenizer()
+    return _TOKENIZER
+
+
+def count_tokens(text):
+    """Count tokens in text using Mistral tokenizer."""
+    if not text or not isinstance(text, str):
+        return 0
+    
+    tokenizer = get_tokenizer()
+    encoding = tokenizer.encode(text)
+    
+    # Handle different return types
+    if hasattr(encoding, 'ids'):
+        return len(encoding.ids)
+    elif isinstance(encoding, list):
+        return len(encoding)
+    else:
+        # Fallback
+        return len(text.split())
+
+
+def split_text_into_chunks(text, max_tokens=MAX_TOKENS_PER_CHUNK):
     """
-    Split text into chunks using RecursiveCharacterTextSplitter.
+    Split text into chunks by actual token count.
     Returns list of chunks, each with <= max_tokens tokens.
+    Uses Mistral tokenizer for accurate token counting.
     """
     if not text or not isinstance(text, str):
         return []
     
-    docs = TEXT_SPLITTER.create_documents([text])
-    chunks = [doc.page_content for doc in docs]
+    tokenizer = get_tokenizer()
     
-    # Further split if any chunk is still too large
-    final_chunks = []
-    for chunk in chunks:
-        words = chunk.split()
-        if len(words) <= max_tokens:
-            final_chunks.append(chunk)
+    try:
+        # Try to encode the full text
+        encoding = tokenizer.encode(text)
+        
+        # Get token IDs
+        if hasattr(encoding, 'ids'):
+            token_ids = encoding.ids
+        elif isinstance(encoding, list):
+            token_ids = encoding
         else:
+            # Fallback to word-based splitting
+            words = text.split()
+            chunks = []
             for i in range(0, len(words), max_tokens):
-                final_chunks.append(" ".join(words[i:i+max_tokens]))
-    
-    return final_chunks
+                chunks.append(" ".join(words[i:i+max_tokens]))
+            return chunks
+        
+        # Split into chunks based on token count
+        chunks = []
+        for i in range(0, len(token_ids), max_tokens):
+            chunk_token_ids = token_ids[i:i + max_tokens]
+            
+            # Decode the chunk back to text if possible
+            if hasattr(tokenizer, 'decode'):
+                chunk_text = tokenizer.decode(chunk_token_ids)
+            else:
+                # Fallback: join token IDs as strings (not ideal but works)
+                chunk_text = " ".join(str(tid) for tid in chunk_token_ids)
+            
+            chunks.append(chunk_text)
+        
+        return chunks
+        
+    except Exception as e:
+        log.error(f"⚠️  Erro ao dividir texto em chunks: {e}")
+        # Ultimate fallback: split by words
+        words = text.split()
+        chunks = []
+        for i in range(0, len(words), max_tokens):
+            chunks.append(" ".join(words[i:i+max_tokens]))
+        return chunks
 
 
 def ensure_embeddings_chunks_table(cur):
@@ -115,7 +250,47 @@ def ensure_embeddings_chunks_table(cur):
         log.info("✅ Tabela embeddings_chunks e suas partições criadas")
 
 
+def generate_embeddings(client, model, texts, batch_size=EMBEDDING_BATCH_SIZE):
+    """
+    Generate embeddings for a list of texts using Mistral API.
+    Handles batching and retries automatically.
+    """
+    all_embeddings = []
+    
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i+batch_size]
+        
+        # Retry logic with exponential backoff
+        for attempt in range(5):  # Max 5 attempts
+            try:
+                response = client.embeddings.create(
+                    model=model,
+                    input=batch
+                )
+                batch_embeddings = [e.embedding for e in response.data]
+                all_embeddings.extend(batch_embeddings)
+                break  # Success, exit retry loop
+                
+            except RateLimitError as e:
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                log.warning(f"⚠️  Rate limit hit (attempt {attempt + 1}/5). Waiting {wait_time}s...")
+                time.sleep(wait_time)
+                
+            except AuthenticationError as e:
+                log.error(f"❌ Authentication error: {e}")
+                raise
+                
+            except Exception as e:
+                log.error(f"❌ Unexpected error (attempt {attempt + 1}/5): {e}")
+                if attempt == 4:  # Last attempt
+                    raise
+                time.sleep(2 ** attempt)
+    
+    return all_embeddings
+
+
 def process_batch(batch):
+    """Process a batch of items from the queue."""
     if not batch:
         return
 
@@ -132,11 +307,8 @@ def process_batch(batch):
             grouped[db][table] = []
         grouped[db][table].append(item)
 
-    embedder = MistralAIEmbeddings(
-        mistral_api_key=os.environ.get("MISTRAL_API_KEY", ""),
-        model="mistral-embed",
-        max_concurrent_requests=MAX_CONCURRENT_REQUESTS
-    )
+    # Get Mistral client
+    client, model = get_mistral_client()
 
     for db_name, tables in grouped.items():
         try:
@@ -181,19 +353,26 @@ def process_batch(batch):
                         log.warning(f"⚠️  Nenhum chunk gerado para {table_name}.{row_id}")
                         continue
                     
+                    # Log chunk sizes for debugging
+                    for idx, chunk in enumerate(chunks):
+                        token_count = count_tokens(chunk)
+                        if token_count > MAX_TOKENS_PER_CHUNK:
+                            log.warning(f"⚠️  Chunk {idx} para {table_name}.{row_id} tem {token_count} tokens (max: {MAX_TOKENS_PER_CHUNK})")
+                    
                     try:
                         # Generate embeddings for all chunks
-                        chunk_embeddings = embedder.embed_documents(chunks)
-                        
-                        log.debug(f"DEBUG: chunk_embeddings type: {type(chunk_embeddings)}, len: {len(chunk_embeddings) if chunk_embeddings else 0}")
+                        chunk_embeddings = generate_embeddings(client, model, chunks)
                         
                         if not chunk_embeddings:
                             log.error(f"❌ Nenhum embedding gerado para {table_name}.{row_id}")
                             continue
                         
+                        if len(chunk_embeddings) != len(chunks):
+                            log.error(f"❌ Mismatch: {len(chunk_embeddings)} embeddings vs {len(chunks)} chunks para {table_name}.{row_id}")
+                            continue
+                        
                         # Save ALL chunks to embeddings_chunks table
                         for idx, (chunk_text, embedding) in enumerate(zip(chunks, chunk_embeddings)):
-                            log.debug(f"DEBUG: chunk {idx}, embedding type: {type(embedding)}, len: {len(embedding) if embedding else 0}")
                             all_chunks_to_save.append((row_id, table_name, idx, chunk_text, embedding))
                         
                         log.info(f"✅ {len(chunks)} chunks processados para {table_name}.{row_id}")
@@ -207,7 +386,7 @@ def process_batch(batch):
             if all_chunks_to_save:
                 with get_db_connection(db_name) as conn:
                     with conn.cursor() as cur:
-                        log.info(f"DEBUG: Total chunks to save: {len(all_chunks_to_save)}")
+                        log.debug(f"DEBUG: Total chunks to save: {len(all_chunks_to_save)}")
                         
                         # Delete existing chunks for these record_ids
                         record_ids = list(set([data[0] for data in all_chunks_to_save]))
@@ -215,7 +394,7 @@ def process_batch(batch):
                             "DELETE FROM public.embeddings_chunks WHERE record_id = ANY(%s::uuid[]);",
                             (record_ids,)
                         )
-                        log.info(f"DEBUG: Deleted existing chunks for {len(record_ids)} records")
+                        log.debug(f"DEBUG: Deleted existing chunks for {len(record_ids)} records")
                         
                         # Use execute_values instead of execute_batch
                         execute_values(
@@ -235,6 +414,21 @@ def process_batch(batch):
             traceback.print_exc()
 
 
+def get_mistral_client():
+    """Get or create Mistral API client (OpenAI-compatible)."""
+    api_key = os.environ.get("MISTRAL_API_KEY", "")
+    base_url = os.environ.get("MISTRAL_API_BASE", "https://api.mistral.ai/v1")
+    model = os.environ.get("MISTRAL_EMBED_MODEL", "mistral-embed")
+    
+    client = OpenAI(
+        api_key=api_key,
+        base_url=base_url,
+        timeout=httpx.Timeout(30.0, connect=10.0),
+        max_retries=3,
+    )
+    return client, model
+
+
 def main():
     log.info(f"Iniciando Universal Embedder. Conectando ao Redis em {REDIS_URL}...")
     r = redis.Redis.from_url(REDIS_URL, socket_timeout=POLL_TIMEOUT_SEC + 5)
@@ -242,6 +436,14 @@ def main():
     # Testar conexão
     r.ping()
     log.info("Conexão com Redis/Valkey estabelecida com sucesso.")
+    
+    # Test Mistral API connection on startup
+    try:
+        client, model = get_mistral_client()
+        response = client.embeddings.create(model=model, input=["test"])
+        log.info(f"✅ Conexão com Mistral API ({model}) verificada com sucesso.")
+    except Exception as e:
+        log.error(f"❌ Falha ao conectar à Mistral API: {e}")
     
     while True:
         try:

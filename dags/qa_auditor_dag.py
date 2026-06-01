@@ -43,8 +43,8 @@ with DAG(
         },
         secrets=[mistral_api_key],
         container_resources=k8s.V1ResourceRequirements(
-            requests={"cpu": "2000m", "memory": "8Gi", "nvidia.com/gpu": "1"},
-            limits={"cpu": "4000m", "memory": "12Gi", "nvidia.com/gpu": "1"},
+            requests={"cpu": "1000m", "memory": "2Gi", "nvidia.com/gpu": "1"},
+            limits={"cpu": "2000m", "memory": "4Gi", "nvidia.com/gpu": "1"},
         ),
         tolerations=[
             k8s.V1Toleration(

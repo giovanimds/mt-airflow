@@ -6,7 +6,7 @@ metadata:
   labels:
     app: universal-embedder
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: universal-embedder
@@ -183,7 +183,7 @@ metadata:
   labels:
     app: wikipedia-pt-scraper
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: wikipedia-pt-scraper
@@ -231,7 +231,7 @@ metadata:
   labels:
     app: arxiv-pt-scraper
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: arxiv-pt-scraper
@@ -279,7 +279,7 @@ metadata:
   labels:
     app: gutenberg-pt-scraper
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: gutenberg-pt-scraper
@@ -327,7 +327,7 @@ metadata:
   labels:
     app: scielo-pt-scraper
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: scielo-pt-scraper
@@ -375,7 +375,7 @@ metadata:
   labels:
     app: bdtd-pt-scraper
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: bdtd-pt-scraper
@@ -423,7 +423,7 @@ metadata:
   labels:
     app: bolema-pt-scraper
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: bolema-pt-scraper
@@ -471,7 +471,7 @@ metadata:
   labels:
     app: remat-pt-scraper
 spec:
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: remat-pt-scraper

@@ -360,6 +360,10 @@ def main():
             # 1. Buscar tarefa na fila
             result = r.brpop("raw_corpus_queue", timeout=5)
             if not result:
+                if r.llen("raw_corpus_queue") == 0:
+                    log.info("Fila 'raw_corpus_queue' vazia. Encerrando o processamento do dia com sucesso.")
+                    import sys
+                    sys.exit(0)
                 continue
                 
             _, payload_json = result

@@ -11,4 +11,4 @@ COPY dags/scripts/universal_embedder.py .
 COPY dags/scripts/generate_qa.py .
 COPY dags/scripts/model_utils.py .
 
-# No ENTRYPOINT - commands are specified in Kubernetes deployment
+ENTRYPOINT ["python", "scraper.py"]

@@ -97,19 +97,53 @@ def get_db_connection():
     except (TypeError, psycopg2.Error):
         return psycopg2.connect(**params)
 
-def ensure_quarantine_table(conn):
+def run_transaction_with_retry(get_conn_func, transaction_func, max_retries=10, delay=5):
+    for attempt in range(max_retries):
+        conn = None
+        try:
+            conn = get_conn_func()
+            with conn:
+                with conn.cursor() as cur:
+                    result = transaction_func(cur)
+            return result
+        except psycopg2.Error as e:
+            err_str = str(e).lower()
+            if any(term in err_str for term in ["catalog version mismatch", "serialization", "mismatched_schema", "ddl occurred"]):
+                log.warning(f"Catalog mismatch / serialization error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
+                if conn:
+                    try:
+                        conn.rollback()
+                        conn.close()
+                    except Exception:
+                        pass
+                time.sleep(delay)
+            else:
+                if conn:
+                    try:
+                        conn.rollback()
+                        conn.close()
+                    except Exception:
+                        pass
+                raise e
+    raise RuntimeError(f"Failed to execute database transaction after {max_retries} attempts due to Catalog Mismatch / Serialization Failure.")
+
+def ensure_quarantine_table():
     log.info("Verificando a existencia da tabela qa_dataset_quarantine...")
-    with conn.cursor() as cur:
+    def txn(cur):
         cur.execute("SELECT EXISTS(SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'qa_dataset_quarantine');")
         exists = cur.fetchone()[0]
+        if exists:
+            log.info("Tabela qa_dataset_quarantine ja existe. Ignorando DDL.")
+            return True
+        return False
+        
+    exists = run_transaction_with_retry(get_db_connection, txn)
     if exists:
-        log.info("Tabela qa_dataset_quarantine ja existe. Ignorando DDL.")
         return
 
     log.info("Garantindo a existencia da tabela qa_dataset_quarantine...")
     sql_path = "create_qa_quarantine_table.sql"
     if not os.path.exists(sql_path):
-        # check alternative paths if running from elsewhere inside the pod
         sql_path = "/app/create_qa_quarantine_table.sql"
     
     if os.path.exists(sql_path):
@@ -135,10 +169,12 @@ def ensure_quarantine_table(conn):
         CREATE INDEX IF NOT EXISTS idx_qa_quarantine_flags
             ON qa_dataset_quarantine USING GIN(audit_flags);
         """
-    with conn.cursor() as cur:
+    def ddl_txn(cur):
         cur.execute(sql)
-    conn.commit()
+    
+    run_transaction_with_retry(get_db_connection, ddl_txn)
     log.info("Tabela qa_dataset_quarantine verificada/criada.")
+
 
 def load_nli_model(device):
     log.info("Carregando modelo NLI (cross-encoder/nli-deberta-v3-small)...")
@@ -238,14 +274,15 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log.info(f"Dispositivo de processamento: {device}")
     
-    conn = get_db_connection()
-    ensure_quarantine_table(conn)
+    ensure_quarantine_table()
     
     # 1. Carrega todos os registros do qa_dataset
     log.info("Buscando registros da tabela qa_dataset...")
-    with conn.cursor() as cur:
+    def load_qa_records(cur):
         cur.execute("SELECT id, question, reasoning, answer, model, source, embedding, metadata FROM qa_dataset;")
-        rows = cur.fetchall()
+        return cur.fetchall()
+        
+    rows = run_transaction_with_retry(get_db_connection, load_qa_records)
     
     qa_records = []
     for r in rows:
@@ -271,9 +308,11 @@ def main():
     # 2. Carrega embeddings de chunks do qa_dataset salvos na tabela embeddings_chunks
     # Para economizar chamadas de API, faremos merge do qa_records['embedding'] com embeddings_chunks
     log.info("Buscando embeddings salvos na tabela embeddings_chunks para qa_dataset...")
-    with conn.cursor() as cur:
+    def load_embeddings_chunks(cur):
         cur.execute("SELECT record_id, embedding FROM embeddings_chunks WHERE table_name = 'qa_dataset' AND chunk_index = 0;")
-        chunks_rows = cur.fetchall()
+        return cur.fetchall()
+        
+    chunks_rows = run_transaction_with_retry(get_db_connection, load_embeddings_chunks)
     chunks_embeddings = {row[0]: row[1] for row in chunks_rows}
     
     # Consolidar embeddings da resposta
@@ -317,8 +356,8 @@ def main():
     
     corpus_embeddings = {}
     if corpus_ids:
-        with conn.cursor() as cur:
-            # Buscando em lotes para evitar limitações de parâmetros em YugabyteDB/PG
+        def load_corpus_embeddings(cur):
+            results = []
             batch_size = 5000
             for i in range(0, len(corpus_ids), batch_size):
                 sub_ids = corpus_ids[i:i+batch_size]
@@ -326,10 +365,14 @@ def main():
                     "SELECT record_id, embedding FROM embeddings_chunks WHERE table_name = 'corpus' AND record_id = ANY(%s::uuid[]);",
                     (sub_ids,)
                 )
-                for rec_id, emb in cur.fetchall():
-                    if rec_id not in corpus_embeddings:
-                        corpus_embeddings[rec_id] = []
-                    corpus_embeddings[rec_id].append(emb)
+                results.extend(cur.fetchall())
+            return results
+            
+        corpus_rows = run_transaction_with_retry(get_db_connection, load_corpus_embeddings)
+        for rec_id, emb in corpus_rows:
+            if rec_id not in corpus_embeddings:
+                corpus_embeddings[rec_id] = []
+            corpus_embeddings[rec_id].append(emb)
                     
     log.info(f"Carregados embeddings de chunks para {len(corpus_embeddings)} corpus_ids.")
     
@@ -486,11 +529,9 @@ def main():
     # 9. Persistir no banco de dados (inserir na quarentena e excluir do qa_dataset)
     if quarantine_records:
         log.info(f"Movendo {len(quarantine_records)} registros para a quarentena em transação única...")
-        move_to_quarantine(conn, quarantine_records)
+        move_to_quarantine(quarantine_records)
         log.info("Operação de movimentação concluída com sucesso.")
         
-    conn.close()
-    
     # 10. Exibir Relatório Final
     t_end = time.time()
     elapsed = t_end - t_start
@@ -508,8 +549,8 @@ def main():
     print(f"\nTempo total de execução:   {mins}m {secs}s")
     print("="*84 + "\n")
 
-def move_to_quarantine(conn, flagged_records):
-    with conn.cursor() as cur:
+def move_to_quarantine(flagged_records):
+    def txn(cur):
         # Inserção
         insert_query = """
             INSERT INTO public.qa_dataset_quarantine (
@@ -542,7 +583,8 @@ def move_to_quarantine(conn, flagged_records):
         record_ids = [r["id"] for r in flagged_records]
         cur.execute(delete_query, (record_ids,))
         
-    conn.commit()
+    run_transaction_with_retry(get_db_connection, txn)
 
 if __name__ == "__main__":
     main()
+

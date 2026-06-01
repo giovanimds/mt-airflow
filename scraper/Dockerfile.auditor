@@ -1,0 +1,15 @@
+FROM docker.io/pytorch/pytorch:2.3.1-cuda11.8-cudnn8-runtime
+
+WORKDIR /app
+
+# Install minimal dependencies
+COPY scraper/requirements.auditor.txt .
+RUN pip install --no-cache-dir -r requirements.auditor.txt
+
+# Copy auditor script and the SQL table creation script
+COPY dags/scripts/qa_auditor.py .
+COPY dags/scripts/create_qa_quarantine_table.sql .
+
+# Cache DeBERTa model so the container doesn't download it at startup
+# (This improves runtime speed and avoids network bottlenecks inside the cluster)
+RUN python -c "from transformers import AutoModelForSequenceClassification, AutoTokenizer; AutoTokenizer.from_pretrained('cross-encoder/nli-deberta-v3-small'); AutoModelForSequenceClassification.from_pretrained('cross-encoder/nli-deberta-v3-small')"

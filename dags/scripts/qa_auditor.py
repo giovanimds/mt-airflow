@@ -98,7 +98,15 @@ def get_db_connection():
         return psycopg2.connect(**params)
 
 def ensure_quarantine_table(conn):
-    log.info("Garantindo a existência da tabela qa_dataset_quarantine...")
+    log.info("Verificando a existencia da tabela qa_dataset_quarantine...")
+    with conn.cursor() as cur:
+        cur.execute("SELECT EXISTS(SELECT FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'qa_dataset_quarantine');")
+        exists = cur.fetchone()[0]
+    if exists:
+        log.info("Tabela qa_dataset_quarantine ja existe. Ignorando DDL.")
+        return
+
+    log.info("Garantindo a existencia da tabela qa_dataset_quarantine...")
     sql_path = "create_qa_quarantine_table.sql"
     if not os.path.exists(sql_path):
         # check alternative paths if running from elsewhere inside the pod

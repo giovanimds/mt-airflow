@@ -145,9 +145,9 @@ spec:
         - name: PG_DATABASE
           value: "ai_labs"
         - name: LLM_PROVIDER
-          value: "vllm"
+          value: "mistral"
         - name: LLM_MODEL_NAME
-          value: "Meta-Llama-3.1-8B-Instruct"
+          value: "mistral-pool"
         - name: VLLM_BASE_URL
           value: "http://192.168.0.7:8000"
         - name: GEMINI_API_KEY_FREE

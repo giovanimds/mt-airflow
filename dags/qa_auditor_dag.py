@@ -54,6 +54,7 @@ with DAG(
             )
         ],
         image_pull_policy="Always",
+        startup_timeout_seconds=600,
         get_logs=True,
         is_delete_operator_pod=True,
     )

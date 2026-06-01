@@ -53,6 +53,16 @@ with DAG(
                 effect="NoSchedule"
             )
         ],
+        pod_template_dict={
+            "spec": {
+                "containers": [
+                    {
+                        "name": "base"
+                    }
+                ],
+                "runtimeClassName": "nvidia"
+            }
+        },
         image_pull_policy="Always",
         startup_timeout_seconds=600,
         get_logs=True,

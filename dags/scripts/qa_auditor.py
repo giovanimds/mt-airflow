@@ -151,20 +151,46 @@ def get_mistral_client():
     client = OpenAI(api_key=api_key, base_url=base_url)
     return client, model
 
-def generate_embeddings_batched(client, model, texts, batch_size=100):
+def generate_embeddings_batched(client, model, texts, batch_size=32):
+    safe_texts = []
+    for t in texts:
+        if not t or not t.strip():
+            safe_texts.append("empty")
+        elif len(t) > 24000:
+            log.warning(f"Texto muito longo ({len(t)} caracteres). Truncando para 24000 caracteres.")
+            safe_texts.append(t[:24000])
+        else:
+            safe_texts.append(t)
+
     embeddings = []
-    for i in range(0, len(texts), batch_size):
-        batch = [t if (t and t.strip()) else "empty" for t in texts[i:i+batch_size]]
-        for attempt in range(5):
+    i = 0
+    while i < len(safe_texts):
+        current_batch_size = min(batch_size, len(safe_texts) - i)
+        success = False
+        attempts = 0
+        while current_batch_size > 0 and not success:
+            batch = safe_texts[i:i+current_batch_size]
             try:
                 response = client.embeddings.create(model=model, input=batch)
                 embeddings.extend([e.embedding for e in response.data])
-                break
+                i += current_batch_size
+                success = True
             except Exception as e:
-                log.warning(f"Erro ao gerar embeddings (tentativa {attempt+1}/5): {e}")
-                if attempt == 4:
-                    raise
-                time.sleep(2 ** attempt)
+                err_str = str(e).lower()
+                if ("too many tokens" in err_str or "bad request" in err_str or "3210" in err_str or "400" in err_str) and current_batch_size > 1:
+                    log.warning(f"Batch with size {current_batch_size} failed with token limit error. Splitting in half...")
+                    current_batch_size = current_batch_size // 2
+                elif ("exceeding max" in err_str or "too many tokens" in err_str or "3210" in err_str or "400" in err_str) and current_batch_size == 1:
+                    log.error(f"Nao foi possivel gerar embedding para item {i} mesmo truncado: {e}. Usando vetor zerado.")
+                    embeddings.append([0.0] * 1024)
+                    i += 1
+                    success = True
+                else:
+                    attempts += 1
+                    log.warning(f"Erro ao gerar embeddings (tentativa {attempts}/5): {e}")
+                    if attempts >= 5:
+                        raise e
+                    time.sleep(2 ** attempts)
     return embeddings
 
 def cosine_similarity(v1, v2):
@@ -262,7 +288,7 @@ def main():
     
     if missing_answer_ids:
         log.info(f"Gerando {len(missing_answer_ids)} embeddings de resposta ausentes via API Mistral...")
-        ans_embs = generate_embeddings_batched(client, embed_model, missing_answer_texts, batch_size=200)
+        ans_embs = generate_embeddings_batched(client, embed_model, missing_answer_texts, batch_size=32)
         ans_emb_dict = dict(zip(missing_answer_ids, ans_embs))
         for r in qa_records:
             if r["id"] in ans_emb_dict:
@@ -270,7 +296,7 @@ def main():
                 
     log.info("Gerando embeddings de pergunta para todos os registros via API Mistral...")
     questions = [r["question"] for r in qa_records]
-    q_embs = generate_embeddings_batched(client, embed_model, questions, batch_size=200)
+    q_embs = generate_embeddings_batched(client, embed_model, questions, batch_size=32)
     for r, q_emb in zip(qa_records, q_embs):
         r["question_embedding"] = q_emb
         

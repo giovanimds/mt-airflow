@@ -1215,8 +1215,26 @@ def main():
             try:
                 with db_conn.cursor() as cur:
                     if status == "processado_com_sucesso":
+                        import uuid
+                        from openai import OpenAI
+                        
+                        def generate_mistral_embeddings(texts: list[str]) -> list[list[float]]:
+                            api_key = os.environ.get("MISTRAL_API_KEY", "")
+                            base_url = os.environ.get("MISTRAL_API_BASE", "https://api.mistral.ai/v1")
+                            model = os.environ.get("MISTRAL_EMBED_MODEL", "mistral-embed")
+                            if not api_key:
+                                log.warning("MISTRAL_API_KEY não definida. Retornando embeddings zerados.")
+                                return [[0.0] * 1024 for _ in texts]
+                            client = OpenAI(api_key=api_key, base_url=base_url)
+                            try:
+                                response = client.embeddings.create(model=model, input=texts)
+                                return [e.embedding for e in response.data]
+                            except Exception as e:
+                                log.error("Erro ao gerar embeddings no Mistral: %s", e)
+                                raise
+                        
                         instrucoes = res.get("dataset_instrucoes") or []
-                        rows_to_insert = []
+                        qa_items = []
                         
                         meta = {
                             "corpus_id": corpus_id,
@@ -1230,21 +1248,63 @@ def main():
                             answer = clean_string(resp_obj.get("answer", ""))
                             
                             if question and answer:
+                                qa_items.append({
+                                    "id": str(uuid.uuid4()),
+                                    "question": question,
+                                    "reasoning": reasoning,
+                                    "answer": answer
+                                })
+                                
+                        if qa_items:
+                            questions = [item["question"] for item in qa_items]
+                            answers = [item["answer"] for item in qa_items]
+                            
+                            try:
+                                q_embeddings = generate_mistral_embeddings(questions)
+                                a_embeddings = generate_mistral_embeddings(answers)
+                            except Exception as emb_err:
+                                log.error("Falha ao obter embeddings de Mistral para Q&A: %s", emb_err)
+                                raise emb_err
+                            
+                            rows_to_insert = []
+                            chunks_to_insert = []
+                            for item, q_emb, a_emb in zip(qa_items, q_embeddings, a_embeddings):
                                 rows_to_insert.append((
-                                    question, reasoning, answer, actual_model, source, None, json.dumps(meta)
+                                    item["id"],
+                                    item["question"],
+                                    item["reasoning"],
+                                    item["answer"],
+                                    actual_model,
+                                    source,
+                                    q_emb,
+                                    json.dumps(meta)
+                                ))
+                                chunks_to_insert.append((
+                                    item["id"],
+                                    'qa_dataset',
+                                    0,
+                                    item["answer"],
+                                    a_emb
                                 ))
                                 
-                        if rows_to_insert:
                             from psycopg2.extras import execute_values
                             execute_values(
                                 cur,
                                 """
-                                INSERT INTO qa_dataset (question, reasoning, answer, model, source, embedding, metadata)
+                                INSERT INTO qa_dataset (id, question, reasoning, answer, model, source, embedding, metadata)
                                 VALUES %s
                                 """,
                                 rows_to_insert
                             )
-                            log.info("✅ Inseridos %d Q&As na tabela qa_dataset.", len(rows_to_insert))
+                            execute_values(
+                                cur,
+                                """
+                                INSERT INTO public.embeddings_chunks (record_id, table_name, chunk_index, chunk_text, embedding)
+                                VALUES %s
+                                """,
+                                chunks_to_insert
+                            )
+                            log.info("✅ Inseridos %d Q&As na tabela qa_dataset e em embeddings_chunks.", len(rows_to_insert))
                             
                     # Marcar como processado na tabela raw_corpus
                     if raw_id:

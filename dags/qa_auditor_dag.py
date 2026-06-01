@@ -8,7 +8,7 @@ from kubernetes.client import models as k8s
 
 log = logging.getLogger(__name__)
 
-AUDITOR_IMAGE = "registry.morescotech.com.br:5000/corpus-scraper:v1.9-auditor"
+AUDITOR_IMAGE = "registry.morescotech.com.br:5000/corpus-scraper:v2.0-auditor"
 
 with DAG(
     dag_id="qa_dataset_auditor",

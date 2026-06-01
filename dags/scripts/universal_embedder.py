@@ -289,6 +289,34 @@ def generate_embeddings(client, model, texts, batch_size=EMBEDDING_BATCH_SIZE):
     return all_embeddings
 
 
+def run_db_transaction_with_retry(db_name, transaction_func, max_retries=10, delay=3):
+    for attempt in range(max_retries):
+        conn = None
+        try:
+            conn = get_db_connection(db_name)
+            with conn:
+                with conn.cursor() as cur:
+                    result = transaction_func(cur)
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            return result
+        except (psycopg2.Error, psycopg2.InterfaceError, psycopg2.OperationalError) as e:
+            log.warning(f"Database error on attempt {attempt + 1}/{max_retries} for {db_name}: {e}")
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            if attempt < max_retries - 1:
+                time.sleep(delay)
+            else:
+                raise
+    raise RuntimeError(f"Failed to execute database transaction after {max_retries} attempts.")
+
+
 def process_batch(batch):
     """Process a batch of items from the queue."""
     if not batch:
@@ -312,36 +340,51 @@ def process_batch(batch):
 
     for db_name, tables in grouped.items():
         try:
-            # 1. Fetch texts that need embedding (using a short-lived DB connection)
+            # 1. Fetch texts that need embedding
             texts_to_embed_by_table = {}
-            with get_db_connection(db_name) as conn:
-                with conn.cursor() as cur:
-                    ensure_embeddings_chunks_table(cur)
-                    conn.commit()
+            
+            def fetch_txn(cur):
+                ensure_embeddings_chunks_table(cur)
+                
+                table_data = {}
+                for table_name, items in tables.items():
+                    source_col = items[0].get("source_column", "text")
+                    ids = [item.get("id") for item in items]
+                    id_placeholders = ",".join(["%s"] * len(ids))
                     
-                    for table_name, items in tables.items():
-                        source_col = items[0].get("source_column", "text")
-                        
-                        ids = [item.get("id") for item in items]
-                        id_placeholders = ",".join(["%s"] * len(ids))
-                        
-                        # Fetch texts that need embedding
+                    if table_name == 'corpus':
+                        cur.execute(
+                            f"SELECT id, title, text, metadata FROM public.corpus WHERE id IN ({id_placeholders});",
+                            tuple(ids)
+                        )
+                    else:
                         cur.execute(
                             f"SELECT id, {source_col} FROM {table_name} WHERE id IN ({id_placeholders});",
                             tuple(ids)
                         )
-                        rows = cur.fetchall()
-                        if rows:
-                            texts_to_embed_by_table[table_name] = rows
+                    
+                    rows = cur.fetchall()
+                    if rows:
+                        table_data[table_name] = rows
+                return table_data
+
+            texts_to_embed_by_table = run_db_transaction_with_retry(db_name, fetch_txn)
             
             if not texts_to_embed_by_table:
                 continue
 
             # 2. Generate embeddings (no DB connection is held open during external API calls!)
             all_chunks_to_save = []
+            corpus_embeddings_to_update = []
             
             for table_name, rows in texts_to_embed_by_table.items():
-                for row_id, text in rows:
+                for row_data in rows:
+                    if table_name == 'corpus':
+                        row_id, title, text, metadata = row_data
+                    else:
+                        row_id, text = row_data
+                        title, metadata = None, None
+                        
                     if not text or not isinstance(text, str) or len(text.strip()) == 0:
                         log.warning(f"⚠️  Texto vazio para {table_name}.{row_id}, pulando")
                         continue
@@ -377,26 +420,54 @@ def process_batch(batch):
                         
                         log.info(f"✅ {len(chunks)} chunks processados para {table_name}.{row_id}")
                         
+                        # Handle metadata + domain embedding for corpus table
+                        if table_name == 'corpus':
+                            meta_dict = {}
+                            if metadata:
+                                if isinstance(metadata, str):
+                                    try:
+                                        meta_dict = json.loads(metadata)
+                                    except Exception:
+                                        pass
+                                elif isinstance(metadata, dict):
+                                    meta_dict = metadata
+                            
+                            domain = meta_dict.get("domain", "")
+                            topic = meta_dict.get("topic", "")
+                            difficulty = meta_dict.get("difficulty", "")
+                            
+                            parts = []
+                            if title:
+                                parts.append(f"Title: {title}")
+                            if domain:
+                                parts.append(f"Domain: {domain}")
+                            if topic:
+                                parts.append(f"Topic: {topic}")
+                            if difficulty:
+                                parts.append(f"Difficulty: {difficulty}")
+                                
+                            metadata_text = " | ".join(parts)
+                            if metadata_text:
+                                meta_embeddings = generate_embeddings(client, model, [metadata_text])
+                                if meta_embeddings:
+                                    corpus_embeddings_to_update.append((meta_embeddings[0], row_id))
+                                    log.info(f"✅ Embedding de metadados gerado para corpus.{row_id}")
+                        
                     except Exception as e:
                         log.error(f"❌ Erro ao gerar embeddings para {table_name}.{row_id}: {e}")
                         traceback.print_exc()
                         continue
             
-            # 3. Batch save all chunks at once (using a new short-lived DB connection)
-            if all_chunks_to_save:
-                with get_db_connection(db_name) as conn:
-                    with conn.cursor() as cur:
-                        log.debug(f"DEBUG: Total chunks to save: {len(all_chunks_to_save)}")
-                        
+            # 3. Batch save all chunks at once (using a new connection with retries)
+            if all_chunks_to_save or corpus_embeddings_to_update:
+                def save_txn(cur):
+                    if all_chunks_to_save:
                         # Delete existing chunks for these record_ids
                         record_ids = list(set([data[0] for data in all_chunks_to_save]))
                         cur.execute(
                             "DELETE FROM public.embeddings_chunks WHERE record_id = ANY(%s::uuid[]);",
                             (record_ids,)
                         )
-                        log.debug(f"DEBUG: Deleted existing chunks for {len(record_ids)} records")
-                        
-                        # Use execute_values instead of execute_batch
                         execute_values(
                             cur,
                             """INSERT INTO public.embeddings_chunks 
@@ -406,8 +477,21 @@ def process_batch(batch):
                             template=None,
                             page_size=100
                         )
-                        conn.commit()
                         log.info(f"✅ {len(all_chunks_to_save)} chunks salvos na tabela embeddings_chunks")
+                    
+                    if corpus_embeddings_to_update:
+                        execute_values(
+                            cur,
+                            """UPDATE public.corpus AS c
+                               SET embedding = val.embedding::float8[]::vector
+                               FROM (VALUES %s) AS val(embedding, id)
+                               WHERE c.id = val.id::uuid""",
+                            corpus_embeddings_to_update,
+                            page_size=100
+                        )
+                        log.info(f"✅ {len(corpus_embeddings_to_update)} embeddings de metadados atualizados na tabela corpus")
+
+                run_db_transaction_with_retry(db_name, save_txn)
                         
         except Exception as e:
             log.error(f"❌ Erro ao processar batch para o DB {db_name}: {e}")

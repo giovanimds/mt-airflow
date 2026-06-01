@@ -97,7 +97,7 @@ def get_db_connection():
     except (TypeError, psycopg2.Error):
         return psycopg2.connect(**params)
 
-def run_transaction_with_retry(get_conn_func, transaction_func, max_retries=10, delay=5):
+def run_transaction_with_retry(get_conn_func, transaction_func, max_retries=15, delay=5):
     for attempt in range(max_retries):
         conn = None
         try:
@@ -105,27 +105,26 @@ def run_transaction_with_retry(get_conn_func, transaction_func, max_retries=10, 
             with conn:
                 with conn.cursor() as cur:
                     result = transaction_func(cur)
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             return result
-        except psycopg2.Error as e:
+        except (psycopg2.Error, psycopg2.InterfaceError, psycopg2.OperationalError) as e:
             err_str = str(e).lower()
-            if any(term in err_str for term in ["catalog version mismatch", "serialization", "mismatched_schema", "ddl occurred"]):
-                log.warning(f"Catalog mismatch / serialization error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
-                if conn:
-                    try:
-                        conn.rollback()
-                        conn.close()
-                    except Exception:
-                        pass
+            log.warning(f"Database error on attempt {attempt + 1}/{max_retries}: {e}")
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            if attempt < max_retries - 1:
+                log.info(f"Retrying transaction in {delay}s...")
                 time.sleep(delay)
             else:
-                if conn:
-                    try:
-                        conn.rollback()
-                        conn.close()
-                    except Exception:
-                        pass
                 raise e
-    raise RuntimeError(f"Failed to execute database transaction after {max_retries} attempts due to Catalog Mismatch / Serialization Failure.")
+    raise RuntimeError(f"Failed to execute database transaction after {max_retries} attempts.")
 
 def ensure_quarantine_table():
     log.info("Verificando a existencia da tabela qa_dataset_quarantine...")
@@ -295,9 +294,10 @@ def main():
             "answer": r[3],
             "model": r[4],
             "source": r[5],
-            "embedding": r[6],
+            "question_embedding": r[6],  # O campo embedding em qa_dataset é o embedding da pergunta
             "metadata": meta,
-            "corpus_id": corpus_id
+            "corpus_id": corpus_id,
+            "embedding": None            # O embedding da resposta virá do chunks
         })
     log.info(f"Carregados {len(qa_records)} registros do qa_dataset.")
     
@@ -305,9 +305,8 @@ def main():
         log.info("Nenhum registro encontrado para auditoria. Encerrando.")
         return
         
-    # 2. Carrega embeddings de chunks do qa_dataset salvos na tabela embeddings_chunks
-    # Para economizar chamadas de API, faremos merge do qa_records['embedding'] com embeddings_chunks
-    log.info("Buscando embeddings salvos na tabela embeddings_chunks para qa_dataset...")
+    # 2. Carrega embeddings de chunks do qa_dataset salvos na tabela embeddings_chunks (que são os embeddings de resposta)
+    log.info("Buscando embeddings de resposta salvos na tabela embeddings_chunks para qa_dataset...")
     def load_embeddings_chunks(cur):
         cur.execute("SELECT record_id, embedding FROM embeddings_chunks WHERE table_name = 'qa_dataset' AND chunk_index = 0;")
         return cur.fetchall()
@@ -315,38 +314,99 @@ def main():
     chunks_rows = run_transaction_with_retry(get_db_connection, load_embeddings_chunks)
     chunks_embeddings = {row[0]: row[1] for row in chunks_rows}
     
-    # Consolidar embeddings da resposta
+    # Consolidar embeddings da resposta e da pergunta
     missing_answer_ids = []
     missing_answer_texts = []
+    missing_question_ids = []
+    missing_question_texts = []
     
     for r in qa_records:
-        emb = r["embedding"]
-        if not emb and r["id"] in chunks_embeddings:
-            emb = chunks_embeddings[r["id"]]
-            r["embedding"] = emb
-        if not emb:
+        # Recupera o embedding da resposta da tabela de chunks
+        ans_emb = chunks_embeddings.get(r["id"])
+        if ans_emb:
+            if isinstance(ans_emb, str):
+                clean_str = ans_emb.strip("[]")
+                r["embedding"] = [float(x) for x in clean_str.split(",") if x.strip()]
+            else:
+                r["embedding"] = list(ans_emb)
+        else:
             missing_answer_ids.append(r["id"])
             missing_answer_texts.append(r["answer"])
             
+        # Verifica se o question_embedding (originalmente carregado de qa_dataset.embedding) está faltando
+        q_emb = r["question_embedding"]
+        if q_emb:
+            if isinstance(q_emb, str):
+                clean_str = q_emb.strip("[]")
+                r["question_embedding"] = [float(x) for x in clean_str.split(",") if x.strip()]
+            else:
+                r["question_embedding"] = list(q_emb)
+        else:
+            missing_question_ids.append(r["id"])
+            missing_question_texts.append(r["question"])
+            
     log.info(f"Embeddings de resposta: {len(qa_records) - len(missing_answer_ids)} encontrados no DB, {len(missing_answer_ids)} pendentes.")
+    log.info(f"Embeddings de pergunta: {len(qa_records) - len(missing_question_ids)} encontrados no DB, {len(missing_question_ids)} pendentes.")
     
-    # Gerar embeddings ausentes (pergunta e resposta)
     client, embed_model = get_mistral_client()
     
+    # Gerar e gravar embeddings de resposta pendentes
     if missing_answer_ids:
         log.info(f"Gerando {len(missing_answer_ids)} embeddings de resposta ausentes via API Mistral...")
         ans_embs = generate_embeddings_batched(client, embed_model, missing_answer_texts, batch_size=32)
         ans_emb_dict = dict(zip(missing_answer_ids, ans_embs))
+        
+        # Gravar no banco de dados na tabela de chunks
+        def save_missing_answers_txn(cur):
+            rows_to_save = []
+            for r_id in missing_answer_ids:
+                emb = ans_emb_dict[r_id]
+                # Acha o texto da resposta
+                answer_text = next(rec["answer"] for rec in qa_records if rec["id"] == r_id)
+                rows_to_save.append((r_id, 'qa_dataset', 0, answer_text, emb))
+                
+            execute_values(
+                cur,
+                """INSERT INTO public.embeddings_chunks (record_id, table_name, chunk_index, chunk_text, embedding)
+                   VALUES %s
+                   ON CONFLICT DO NOTHING""",
+                rows_to_save,
+                page_size=100
+            )
+        log.info("Salvando embeddings de resposta pendentes no banco...")
+        run_transaction_with_retry(get_db_connection, save_missing_answers_txn)
+        
+        # Atualiza em memória
         for r in qa_records:
             if r["id"] in ans_emb_dict:
                 r["embedding"] = ans_emb_dict[r["id"]]
                 
-    log.info("Gerando embeddings de pergunta para todos os registros via API Mistral...")
-    questions = [r["question"] for r in qa_records]
-    q_embs = generate_embeddings_batched(client, embed_model, questions, batch_size=32)
-    for r, q_emb in zip(qa_records, q_embs):
-        r["question_embedding"] = q_emb
+    # Gerar e gravar embeddings de pergunta pendentes
+    if missing_question_ids:
+        log.info(f"Gerando {len(missing_question_ids)} embeddings de pergunta ausentes via API Mistral...")
+        q_embs = generate_embeddings_batched(client, embed_model, missing_question_texts, batch_size=32)
+        q_emb_dict = dict(zip(missing_question_ids, q_embs))
         
+        # Gravar no banco de dados na coluna de embeddings da tabela qa_dataset
+        def save_missing_questions_txn(cur):
+            rows_to_save = [(emb, r_id) for r_id, emb in q_emb_dict.items()]
+            execute_values(
+                cur,
+                """UPDATE public.qa_dataset AS q
+                   SET embedding = val.embedding::float8[]::vector
+                   FROM (VALUES %s) AS val(embedding, id)
+                   WHERE q.id = val.id::uuid""",
+                rows_to_save,
+                page_size=100
+            )
+        log.info("Salvando embeddings de pergunta pendentes no banco...")
+        run_transaction_with_retry(get_db_connection, save_missing_questions_txn)
+        
+        # Atualiza em memória
+        for r in qa_records:
+            if r["id"] in q_emb_dict:
+                r["question_embedding"] = q_emb_dict[r["id"]]
+                
     log.info("Embeddings do qa_dataset prontos.")
     
     # 3. Carrega embeddings de corpus do banco de dados
@@ -578,10 +638,14 @@ def move_to_quarantine(flagged_records):
             
         execute_values(cur, insert_query, rows, page_size=100)
         
-        # Remoção
+        # Remoção do qa_dataset
         delete_query = "DELETE FROM public.qa_dataset WHERE id = ANY(%s::uuid[]);"
         record_ids = [r["id"] for r in flagged_records]
         cur.execute(delete_query, (record_ids,))
+        
+        # Remoção dos chunks de resposta de embeddings_chunks
+        delete_chunks_query = "DELETE FROM public.embeddings_chunks WHERE record_id = ANY(%s::uuid[]) AND table_name = 'qa_dataset';"
+        cur.execute(delete_chunks_query, (record_ids,))
         
     run_transaction_with_retry(get_db_connection, txn)
 

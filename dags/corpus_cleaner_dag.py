@@ -8,7 +8,7 @@ from kubernetes.client import models as k8s
 
 log = logging.getLogger(__name__)
 
-CLEANER_IMAGE = "192.168.0.7:5000/corpus-scraper:v1.2"
+CLEANER_IMAGE = "registry.morescotech.com.br:5000/corpus-scraper:v2.0"
 
 with DAG(
     dag_id="corpus_cleaner_dag",

@@ -43,7 +43,7 @@ with DAG(
             "PG_DATABASE": "ai_labs",
         },
         secrets=[gemini_free_key],
-        resources=k8s.V1ResourceRequirements(
+        container_resources=k8s.V1ResourceRequirements(
             requests={"cpu": "200m", "memory": "512Mi"},
             limits={"cpu": "1000m", "memory": "2Gi"},
         ),

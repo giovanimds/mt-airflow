@@ -218,7 +218,6 @@ def generate_embeddings_batched(client, model, texts, batch_size=25):
                 embeddings.extend([e.embedding for e in response.data])
                 i += current_batch_size
                 success = True
-                time.sleep(1)  # Rate limiting: 1 second delay between batches to avoid API rate limits
             except Exception as e:
                 err_str = str(e).lower()
                 if ("too many tokens" in err_str or "bad request" in err_str or "3210" in err_str or "400" in err_str) and current_batch_size > 1:

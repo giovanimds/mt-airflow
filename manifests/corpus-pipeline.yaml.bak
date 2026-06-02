@@ -46,8 +46,6 @@ spec:
           value: "100"
         - name: EMBEDDER_POLL_TIMEOUT
           value: "5"
-        - name: EMBEDDING_BATCH_SIZE
-          value: "25"
         resources:
           requests:
             cpu: 100m

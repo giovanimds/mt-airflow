@@ -269,7 +269,6 @@ def generate_embeddings(client, model, texts, batch_size=EMBEDDING_BATCH_SIZE):
                 )
                 batch_embeddings = [e.embedding for e in response.data]
                 all_embeddings.extend(batch_embeddings)
-                time.sleep(1)  # Rate limiting: 1 second delay between batches to avoid API rate limits
                 break  # Success, exit retry loop
                 
             except RateLimitError as e:

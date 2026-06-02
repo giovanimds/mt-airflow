@@ -17,14 +17,14 @@ spec:
     spec:
       containers:
       - name: embedder
-        image: registry.morescotech.com.br:5000/corpus-scraper:v2.0
+        image: registry.morescotech.com.br:5000/corpus-scraper:v2.1
         imagePullPolicy: Always
         command: ["python", "universal_embedder.py"]
         env:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER
@@ -82,7 +82,7 @@ spec:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER
@@ -137,7 +137,7 @@ spec:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER
@@ -208,7 +208,7 @@ spec:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER
@@ -256,7 +256,7 @@ spec:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER
@@ -304,7 +304,7 @@ spec:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER
@@ -352,7 +352,7 @@ spec:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER
@@ -400,7 +400,7 @@ spec:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER
@@ -448,7 +448,7 @@ spec:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER
@@ -496,7 +496,7 @@ spec:
         - name: REDIS_URL
           value: "redis://:246608@valkey-primary.default.svc.cluster.local:6379"
         - name: PG_HOST
-          value: "postgres.morescotech.com.br"
+          value: "postgres.default.svc.cluster.local"
         - name: PG_PORT
           value: "5432"
         - name: PG_USER

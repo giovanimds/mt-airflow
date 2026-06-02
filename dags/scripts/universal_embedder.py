@@ -23,8 +23,12 @@ BATCH_SIZE = int(os.environ.get("EMBEDDER_BATCH_SIZE", "100"))
 POLL_TIMEOUT_SEC = int(os.environ.get("EMBEDDER_POLL_TIMEOUT", "5"))
 MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "1"))
 
-# Mistral embed model supports up to 8192 tokens, so we use 8000 to be safe
-MAX_TOKENS_PER_CHUNK = 8000
+# Mistral embed model supports up to 8192 tokens
+# We use 7850 to be safe (leaving 342 tokens margin for tokenizer differences)
+# The actual limit reported by API is 7900, but we leave room for:
+# - Tokenizer BOS/EOS tokens that may be added during decode/encode cycles
+# - Tokenization differences between our tokenizer and Mistral's API tokenizer
+MAX_TOKENS_PER_CHUNK = 7850
 EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "25"))  # Reduced from 32 to avoid rate limits
 
 # Global tokenizer cache
@@ -34,7 +38,7 @@ _TOKENIZER = None
 def get_db_connection(dbname):
     """Get database connection."""
     params = {
-        "host": os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
+        "host": os.environ.get("PG_HOST", "postgres.default.svc.cluster.local"),
         "port": int(os.environ.get("PG_PORT", 5432)),
         "user": os.environ.get("PG_USER", "yugabyte"),
         "password": os.environ.get("PG_PASSWORD", "YugabytePass2026"),
@@ -133,10 +137,18 @@ def get_tokenizer():
     return _TOKENIZER
 
 
-def count_tokens(text):
-    """Count tokens in text using Mistral tokenizer."""
+def count_tokens(text, token_ids=None):
+    """Count tokens in text using Mistral tokenizer.
+    
+    If token_ids is provided, use its length directly (most accurate).
+    Otherwise, encode the text.
+    """
     if not text or not isinstance(text, str):
         return 0
+    
+    # If we already have token IDs, use them directly
+    if token_ids is not None:
+        return len(token_ids)
     
     tokenizer = get_tokenizer()
     encoding = tokenizer.encode(text)
@@ -185,15 +197,47 @@ def split_text_into_chunks(text, max_tokens=MAX_TOKENS_PER_CHUNK):
             chunk_token_ids = token_ids[i:i + max_tokens]
             
             # Decode the chunk back to text if possible
-            if hasattr(tokenizer, 'decode'):
-                chunk_text = tokenizer.decode(chunk_token_ids)
+            # IMPORTANT: Use decode methods that don't add special tokens
+            if hasattr(tokenizer, 'decode_ids'):
+                # SentencePieceProcessor: use decode_ids to avoid adding BOS/EOS
+                chunk_text = tokenizer.decode_ids(chunk_token_ids)
+            elif hasattr(tokenizer, 'decode'):
+                # HuggingFace Tokenizer: skip special tokens
+                chunk_text = tokenizer.decode(chunk_token_ids, skip_special_tokens=True)
             else:
                 # Fallback: join token IDs as strings (not ideal but works)
                 chunk_text = " ".join(str(tid) for tid in chunk_token_ids)
             
-            chunks.append(chunk_text)
+            # Store chunk with its token count (we already have the exact count from the slice)
+            chunks.append((chunk_text, len(chunk_token_ids)))
         
-        return chunks
+        # Extract just the text from tuples and validate
+        result_chunks = []
+        for chunk_text, token_count in chunks:
+            # This should never exceed max_tokens since we sliced by max_tokens
+            # But double-check to be safe
+            if token_count > max_tokens:
+                log.warning(f"⚠️  Chunk tem {token_count} tokens (max: {max_tokens}), truncando...")
+                # Take only the first max_tokens from this chunk
+                # Re-encode to get proper text
+                re_encoded = tokenizer.encode(chunk_text)
+                if hasattr(re_encoded, 'ids'):
+                    truncated_ids = re_encoded.ids[:max_tokens]
+                elif isinstance(re_encoded, list):
+                    truncated_ids = re_encoded[:max_tokens]
+                else:
+                    truncated_ids = re_encoded
+                
+                if hasattr(tokenizer, 'decode_ids'):
+                    chunk_text = tokenizer.decode_ids(truncated_ids)
+                elif hasattr(tokenizer, 'decode'):
+                    chunk_text = tokenizer.decode(truncated_ids, skip_special_tokens=True)
+                else:
+                    chunk_text = " ".join(str(tid) for tid in truncated_ids)
+            
+            result_chunks.append(chunk_text)
+        
+        return result_chunks
         
     except Exception as e:
         log.error(f"⚠️  Erro ao dividir texto em chunks: {e}")
@@ -253,7 +297,7 @@ def ensure_embeddings_chunks_table(cur):
 def generate_embeddings(client, model, texts, batch_size=EMBEDDING_BATCH_SIZE):
     """
     Generate embeddings for a list of texts using Mistral API.
-    Handles batching and retries automatically.
+    Handles batching, retries, and token-limit auto-splitting automatically.
     """
     all_embeddings = []
     
@@ -282,6 +326,32 @@ def generate_embeddings(client, model, texts, batch_size=EMBEDDING_BATCH_SIZE):
                 raise
                 
             except Exception as e:
+                # Check if it is a "Too many tokens overall" error
+                err_msg = str(e).lower()
+                is_too_many_tokens = (
+                    "too many tokens" in err_msg or 
+                    "split into more batches" in err_msg or
+                    ("400" in err_msg and "token" in err_msg)
+                )
+                if hasattr(e, 'status_code') and getattr(e, 'status_code') == 400:
+                    is_too_many_tokens = True
+                
+                if is_too_many_tokens and len(batch) > 1:
+                    log.warning(f"⚠️  Batch contains too many tokens overall. Splitting batch of size {len(batch)} into two halves...")
+                    mid = len(batch) // 2
+                    left_batch = batch[:mid]
+                    right_batch = batch[mid:]
+                    try:
+                        # Recursively generate embeddings for both halves with half batch size
+                        left_embeddings = generate_embeddings(client, model, left_batch, batch_size=len(left_batch))
+                        right_embeddings = generate_embeddings(client, model, right_batch, batch_size=len(right_batch))
+                        all_embeddings.extend(left_embeddings)
+                        all_embeddings.extend(right_embeddings)
+                        break  # Success, exit retry loop
+                    except Exception as sub_e:
+                        log.error(f"❌ Error when processing split batches: {sub_e}")
+                        raise
+                
                 log.error(f"❌ Unexpected error (attempt {attempt + 1}/5): {e}")
                 if attempt == 4:  # Last attempt
                     raise
@@ -398,10 +468,14 @@ def process_batch(batch):
                         continue
                     
                     # Log chunk sizes for debugging
+                    # Use count_tokens with text to get accurate count (may include BOS in some tokenizers)
+                    # But this should never exceed MAX_TOKENS_PER_CHUNK due to our splitting logic
                     for idx, chunk in enumerate(chunks):
                         token_count = count_tokens(chunk)
                         if token_count > MAX_TOKENS_PER_CHUNK:
-                            log.warning(f"⚠️  Chunk {idx} para {table_name}.{row_id} tem {token_count} tokens (max: {MAX_TOKENS_PER_CHUNK})")
+                            # This should NOT happen with our fix, but log if it does
+                            log.error(f"❌ CRITICAL: Chunk {idx} para {table_name}.{row_id} tem {token_count} tokens (max: {MAX_TOKENS_PER_CHUNK})")
+                            log.error(f"   Chunk text (first 200 chars): {chunk[:200]}...")
                     
                     try:
                         # Generate embeddings for all chunks

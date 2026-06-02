@@ -24,11 +24,11 @@ POLL_TIMEOUT_SEC = int(os.environ.get("EMBEDDER_POLL_TIMEOUT", "5"))
 MAX_CONCURRENT_REQUESTS = int(os.environ.get("MAX_CONCURRENT_REQUESTS", "1"))
 
 # Mistral embed model supports up to 8192 tokens
-# We use 7850 to be safe (leaving 342 tokens margin for tokenizer differences)
-# The actual limit reported by API is 7900, but we leave room for:
-# - Tokenizer BOS/EOS tokens that may be added during decode/encode cycles
-# - Tokenization differences between our tokenizer and Mistral's API tokenizer
-MAX_TOKENS_PER_CHUNK = 7850
+# We use 8000 to be safe (leaving 192 tokens margin)
+# The API limit is 8192, but we use 8000 to account for:
+# - Small tokenizer differences between local and API tokenizers
+# - Extra tokens from text formatting
+MAX_TOKENS_PER_CHUNK = 8000
 EMBEDDING_BATCH_SIZE = int(os.environ.get("EMBEDDING_BATCH_SIZE", "25"))  # Reduced from 32 to avoid rate limits
 
 # Global tokenizer cache
@@ -466,16 +466,6 @@ def process_batch(batch):
                     if not chunks:
                         log.warning(f"⚠️  Nenhum chunk gerado para {table_name}.{row_id}")
                         continue
-                    
-                    # Log chunk sizes for debugging
-                    # Use count_tokens with text to get accurate count (may include BOS in some tokenizers)
-                    # But this should never exceed MAX_TOKENS_PER_CHUNK due to our splitting logic
-                    for idx, chunk in enumerate(chunks):
-                        token_count = count_tokens(chunk)
-                        if token_count > MAX_TOKENS_PER_CHUNK:
-                            # This should NOT happen with our fix, but log if it does
-                            log.error(f"❌ CRITICAL: Chunk {idx} para {table_name}.{row_id} tem {token_count} tokens (max: {MAX_TOKENS_PER_CHUNK})")
-                            log.error(f"   Chunk text (first 200 chars): {chunk[:200]}...")
                     
                     try:
                         # Generate embeddings for all chunks

@@ -43,6 +43,9 @@ _EXCLUDE_PATTERNS = [
     "nano-banana", "antigravity", "deep-research",
 ]
 
+# Modelo Gemma 4 26B - garantir que não seja excluído
+_GEMMA_4_26B_PATTERNS = ["gemma-4-26b", "gemma4-26b"]
+
 _POOL_LOCK = __import__("threading").Lock()
 _POOL: list[dict] = []  # [{key, model_id, key_name, cooldown_until}]
 _POOL_COUNTER = 0
@@ -60,7 +63,13 @@ def _discover_models(api_key: str) -> list[str]:
             name = m.get("name", "").replace("models/", "")
             if "generateContent" not in m.get("supportedGenerationMethods", []):
                 continue
-            if any(pat in name.lower() for pat in _EXCLUDE_PATTERNS):
+            name_lower = name.lower()
+            # Garantir que modelos Gemma 4 26B não sejam excluídos
+            if any(pat in name_lower for pat in _GEMMA_4_26B_PATTERNS):
+                log.info("[Pool] 🎯 Modelo priorizado: %s", name)
+                result.append(name)
+                continue
+            if any(pat in name_lower for pat in _EXCLUDE_PATTERNS):
                 continue
             result.append(name)
         log.info("[Pool] %d modelos descobertos: %s", len(result), result)
@@ -196,7 +205,14 @@ TEXTO BRUTO:
         try:
             genai.configure(api_key=entry["key"])
             model = genai.GenerativeModel(mid)
-            timeout = 90.0 if "gemma" in mid.lower() else 30.0
+            # Ajuste de timeout específico para modelos Gemma
+            # Gemma 4 26B e modelos grandes precisam de mais tempo
+            if "gemma-4-26b" in mid.lower():
+                timeout = 300.0  # 5 minutos para modelos muito grandes
+            elif "gemma" in mid.lower():
+                timeout = 180.0  # 3 minutos para outros modelos Gemma
+            else:
+                timeout = 30.0  # 30 segundos para outros modelos
             
             gen_config = None
             if "gemma" not in mid.lower():

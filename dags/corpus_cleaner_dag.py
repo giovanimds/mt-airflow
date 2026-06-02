@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from airflow import DAG
 from airflow.providers.cncf.kubernetes.operators.pod import KubernetesPodOperator
 from airflow.providers.cncf.kubernetes.secret import Secret
@@ -50,6 +50,8 @@ with DAG(
         image_pull_policy="Always",
         get_logs=True,
         is_delete_operator_pod=True,
+        startup_timeout_seconds=300,  # 5 minutos para iniciar o pod
+        execution_timeout=timedelta(hours=2),  # 2 horas de timeout total
     )
 
     clean_corpus_pod

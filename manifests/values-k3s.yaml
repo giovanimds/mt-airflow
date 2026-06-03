@@ -69,11 +69,17 @@ volumes:
   - name: gcp-service-account
     secret:
       secretName: airflow-gcp-key
+  - name: dataset-builder-volume
+    hostPath:
+      path: /home/gmsilveira/dev/dataset-builder
+      type: Directory
 
 volumeMounts:
   - name: gcp-service-account
     mountPath: /opt/airflow/secrets/gcp
     readOnly: true
+  - name: dataset-builder-volume
+    mountPath: /opt/airflow/dataset-builder
 
 data:
   metadataConnection:

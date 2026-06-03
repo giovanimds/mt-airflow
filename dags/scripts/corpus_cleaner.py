@@ -82,7 +82,8 @@ def _probe_model(api_key: str, model_id: str) -> bool:
     try:
         genai.configure(api_key=api_key)
         m = genai.GenerativeModel(model_id)
-        m.generate_content("Hi", request_options={"timeout": 10.0})
+        probe_timeout = 60.0 if "gemma" in model_id.lower() else 10.0
+        m.generate_content("Hi", request_options={"timeout": probe_timeout})
         log.info("[Pool] ✅ %s: cota OK", model_id)
         return True
     except Exception as e:

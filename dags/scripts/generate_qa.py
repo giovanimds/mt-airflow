@@ -60,12 +60,14 @@ def _probe_gemini_model(api_key: str, model_id: str) -> bool:
     Retorna True se respondeu com sucesso.
     """
     try:
+        timeout = 60.0 if "gemma" in model_id.lower() else 15.0
         llm = ChatGoogleGenerativeAI(
             model=model_id,
             temperature=0.0,
             max_retries=0,
             max_output_tokens=16,
             google_api_key=api_key,
+            timeout=timeout,
         )
         llm.invoke("Hi")
         log.info("[GeminiPool] ✅ %s: cota OK", model_id)
@@ -123,12 +125,19 @@ class GeminiPoolLLM:
             for mid in model_ids:
                 ok = _probe_gemini_model(free_key, mid) if probe else True
                 if ok:
+                    if "gemma-4-26b" in mid.lower():
+                        timeout = 300.0
+                    elif "gemma" in mid.lower():
+                        timeout = 180.0
+                    else:
+                        timeout = None
                     llm = ChatGoogleGenerativeAI(
                         model=mid,
                         temperature=0.5,
                         max_retries=0,
                         max_output_tokens=max_output_tokens,
                         google_api_key=free_key,
+                        timeout=timeout,
                     )
                     entries.append({
                         "llm": llm,

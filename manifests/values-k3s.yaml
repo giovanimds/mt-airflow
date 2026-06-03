@@ -204,12 +204,12 @@ ingress:
     ingressClassName: traefik
     hosts:
       - name: "airflow.morescotech.com.br"
+        tls:
+          enabled: true
+          secretName: wildcard-morescotech-tls
     annotations:
       traefik.ingress.kubernetes.io/router.entrypoints: websecure
       traefik.ingress.kubernetes.io/router.tls: "true"
-    tls:
-      enabled: true
-      secretName: wildcard-morescotech-tls
   flower:
     enabled: false
 

@@ -11,12 +11,8 @@ spec:
     services:
     - name: yb-tserver-service
       port: 5432
-    tls:
-      certResolver: le
-      options:
-        name: postgres-alpn
-        namespace: default
-  - match: HostSNI(`*`)
-    services:
-    - name: yb-tserver-service
-      port: 5432
+  tls:
+    certResolver: le
+    options:
+      name: postgres-alpn
+      namespace: default

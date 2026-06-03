@@ -59,7 +59,7 @@ extraEnv: |
   - name: GEMINI_PAID_MODEL
     value: gemini-2.5-flash-lite
   - name: PG_HOST
-    value: postgres.morescotech.com.br
+    value: postgres.default.svc.cluster.local
   - name: PG_DATABASE
     value: airflow
   - name: REDIS_URL
@@ -79,11 +79,11 @@ data:
   metadataConnection:
     user: yugabyte
     pass: YugabytePass2026
-    host: postgres.morescotech.com.br
+    host: postgres.default.svc.cluster.local
     port: 5432
     db: airflow
     protocol: postgresql
-    sslmode: require
+    sslmode: disable
 
 
 postgresql:

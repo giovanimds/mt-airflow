@@ -428,6 +428,11 @@ def process_batch(batch):
                             f"SELECT id, title, text, metadata FROM public.corpus WHERE id IN ({id_placeholders});",
                             tuple(ids)
                         )
+                    elif table_name == 'conversations_dataset':
+                        cur.execute(
+                            f"SELECT id, NULL as title, conversation_text as text, metadata FROM public.conversations_dataset WHERE id IN ({id_placeholders});",
+                            tuple(ids)
+                        )
                     else:
                         cur.execute(
                             f"SELECT id, {source_col} FROM {table_name} WHERE id IN ({id_placeholders});",
@@ -447,10 +452,11 @@ def process_batch(batch):
             # 2. Generate embeddings (no DB connection is held open during external API calls!)
             all_chunks_to_save = []
             corpus_embeddings_to_update = []
+            conversations_embeddings_to_update = []
             
             for table_name, rows in texts_to_embed_by_table.items():
                 for row_data in rows:
-                    if table_name == 'corpus':
+                    if table_name in ('corpus', 'conversations_dataset'):
                         row_id, title, text, metadata = row_data
                     else:
                         row_id, text = row_data
@@ -485,8 +491,8 @@ def process_batch(batch):
                         
                         log.info(f"✅ {len(chunks)} chunks processados para {table_name}.{row_id}")
                         
-                        # Handle metadata + domain embedding for corpus table
-                        if table_name == 'corpus':
+                        # Handle metadata + domain embedding for corpus table or conversations_dataset table
+                        if table_name in ('corpus', 'conversations_dataset'):
                             meta_dict = {}
                             if metadata:
                                 if isinstance(metadata, str):
@@ -497,26 +503,40 @@ def process_batch(batch):
                                 elif isinstance(metadata, dict):
                                     meta_dict = metadata
                             
-                            domain = meta_dict.get("domain", "")
-                            topic = meta_dict.get("topic", "")
-                            difficulty = meta_dict.get("difficulty", "")
-                            
                             parts = []
-                            if title:
-                                parts.append(f"Title: {title}")
-                            if domain:
-                                parts.append(f"Domain: {domain}")
-                            if topic:
-                                parts.append(f"Topic: {topic}")
-                            if difficulty:
-                                parts.append(f"Difficulty: {difficulty}")
+                            if table_name == 'corpus':
+                                domain = meta_dict.get("domain", "")
+                                topic = meta_dict.get("topic", "")
+                                difficulty = meta_dict.get("difficulty", "")
+                                if title:
+                                    parts.append(f"Title: {title}")
+                                if domain:
+                                    parts.append(f"Domain: {domain}")
+                                if topic:
+                                    parts.append(f"Topic: {topic}")
+                                if difficulty:
+                                    parts.append(f"Difficulty: {difficulty}")
+                            else: # conversations_dataset
+                                topic = meta_dict.get("topic", "")
+                                model_used = meta_dict.get("model_used", "")
+                                source = meta_dict.get("source", "")
+                                if topic:
+                                    parts.append(f"Topic: {topic}")
+                                if model_used:
+                                    parts.append(f"Model: {model_used}")
+                                if source:
+                                    parts.append(f"Source: {source}")
                                 
                             metadata_text = " | ".join(parts)
                             if metadata_text:
                                 meta_embeddings = generate_embeddings(client, model, [metadata_text])
                                 if meta_embeddings:
-                                    corpus_embeddings_to_update.append((meta_embeddings[0], row_id))
-                                    log.info(f"✅ Embedding de metadados gerado para corpus.{row_id}")
+                                    if table_name == 'corpus':
+                                        corpus_embeddings_to_update.append((meta_embeddings[0], row_id))
+                                        log.info(f"✅ Embedding de metadados gerado para corpus.{row_id}")
+                                    else:
+                                        conversations_embeddings_to_update.append((meta_embeddings[0], row_id))
+                                        log.info(f"✅ Embedding de metadados gerado para conversations_dataset.{row_id}")
                         
                     except Exception as e:
                         log.error(f"❌ Erro ao gerar embeddings para {table_name}.{row_id}: {e}")
@@ -524,7 +544,7 @@ def process_batch(batch):
                         continue
             
             # 3. Batch save all chunks at once (using a new connection with retries)
-            if all_chunks_to_save or corpus_embeddings_to_update:
+            if all_chunks_to_save or corpus_embeddings_to_update or conversations_embeddings_to_update:
                 def save_txn(cur):
                     if all_chunks_to_save:
                         # Delete existing chunks for these record_ids
@@ -555,6 +575,18 @@ def process_batch(batch):
                             page_size=100
                         )
                         log.info(f"✅ {len(corpus_embeddings_to_update)} embeddings de metadados atualizados na tabela corpus")
+                        
+                    if conversations_embeddings_to_update:
+                        execute_values(
+                            cur,
+                            """UPDATE public.conversations_dataset AS c
+                               SET embedding = val.embedding::float8[]::vector
+                               FROM (VALUES %s) AS val(embedding, id)
+                               WHERE c.id = val.id::uuid""",
+                            conversations_embeddings_to_update,
+                            page_size=100
+                        )
+                        log.info(f"✅ {len(conversations_embeddings_to_update)} embeddings de metadados atualizados na tabela conversations_dataset")
 
                 run_db_transaction_with_retry(db_name, save_txn)
                         

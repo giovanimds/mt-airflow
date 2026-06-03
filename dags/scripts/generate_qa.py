@@ -264,12 +264,12 @@ class GeminiPoolLLM:
 def get_db_connection():
     import psycopg2
     params = {
-        "host": os.environ.get("PG_HOST", "postgres.morescotech.com.br"),
+        "host": os.environ.get("PG_HOST", "postgres.default.svc.cluster.local"),
         "port": int(os.environ.get("PG_PORT", 5432)),
         "user": os.environ.get("PG_USER", "yugabyte"),
         "password": os.environ.get("PG_PASSWORD", "YugabytePass2026"),
         "database": os.environ.get("PG_DATABASE", "ai_labs"),
-        "sslmode": "require"
+        "sslmode": os.environ.get("PG_SSLMODE", "disable")
     }
     try:
         return psycopg2.connect(**params, load_balance=True)

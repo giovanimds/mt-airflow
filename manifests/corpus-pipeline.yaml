@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: embedder
-        image: registry.morescotech.com.br:5000/corpus-scraper:v2.3
+        image: 192.168.0.7:5000/corpus-scraper:v2.4
         imagePullPolicy: Always
         command: ["python", "universal_embedder.py"]
         env:
